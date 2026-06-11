@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${AWS_REGION}
+  version: "1.31"
+
+iam:
+  withOIDC: true
+
+# Cluster VPC subnets are created in these AZs. Make sure ${EFA_AZ} below is
+# in this list — otherwise the nodegroup will have no subnet to land in.
+availabilityZones:
+  - ${AWS_REGION}a
+  - ${AWS_REGION}b
+  - ${AWS_REGION}c
+
+managedNodeGroups:
+  - name: gpu-g5-48xl
+    instanceType: g5.48xlarge
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 500
+    volumeType: gp3
+    # EFA pinning: single AZ is required (EFA peers must share an AZ).
+    availabilityZones:
+      - ${EFA_AZ}
+    privateNetworking: true
+    efaEnabled: true
+    labels:
+      role: gpu-worker
+      vpc.amazonaws.com/efa.present: "true"
+    tags:
+      nodegroup-purpose: vllm-multinode-inference
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: eks-pod-identity-agent
+  - name: aws-mountpoint-s3-csi-driver
+    attachPolicyARNs:
+      - "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/MountpointS3-${CLUSTER_NAME}"

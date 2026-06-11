@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-nemotron-super-api
+spec:
+  type: ClusterIP
+  selector:
+    # Only the leader pod runs the vLLM API server. Workers are Ray-only.
+    app: vllm-nemotron-super
+    role: leader
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
