@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aiperf
+  labels:
+    app: aiperf
+spec:
+  restartPolicy: Never
+  containers:
+    - name: aiperf
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+      command: ["bash", "-c"]
+      args:
+        - |
+          set -o pipefail
+          aiperf profile \
+            --model=nemotron \
+            --tokenizer=/workspace/models/nemotron-3-nano-bf16 \
+            --tokenizer-trust-remote-code \
+            --url=http://vllm-nemotron:8000 \
+            --endpoint-type=chat \
+            --endpoint=/v1/chat/completions \
+            --streaming \
+            --concurrency=8 \
+            --request-count=200 \
+            --warmup-request-count=8 \
+            --isl=1024 \
+            --osl=2000
+          rc=$?
+          echo
+          echo "=== aiperf exited with code $rc ==="
+          echo "=== artifacts at /workspace/artifacts (kubectl cp aiperf:/workspace/artifacts ./aiperf-artifacts) ==="
+          echo "=== container will stay up; run 'kubectl delete pod aiperf' when done ==="
+          sleep infinity
+      volumeMounts:
+        - name: models
+          mountPath: /workspace/models
+          readOnly: true
+        - name: artifacts
+          mountPath: /workspace/artifacts
+  volumes:
+    - name: models
+      persistentVolumeClaim:
+        claimName: nemotron-models
+    - name: artifacts
+      emptyDir: {}

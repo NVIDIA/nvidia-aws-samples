@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-nemotron-super
+  labels:
+    app: vllm-nemotron-super
+spec:
+  replicas: 1
+  startupPolicy: LeaderCreated
+  leaderWorkerTemplate:
+    size: 2  # 1 leader + 1 worker = 2 g5.48xlarge nodes total
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          app: vllm-nemotron-super
+          role: leader
+      spec:
+        nodeSelector:
+          role: gpu-worker
+        containers:
+          - name: vllm-leader
+            image: 763104351884.dkr.ecr.${AWS_REGION}.amazonaws.com/vllm:0.20.0-gpu-py312-cu130-ubuntu22.04-ec2
+            command: ["bash", "-c"]
+            args:
+              - |
+                set -euo pipefail
+                # Ray isn't preinstalled in the vLLM DLC — install it before bootstrapping
+                pip install --quiet --no-cache-dir "ray[default]"
+                ray start --head \
+                  --port=6379 \
+                  --num-gpus=8 \
+                  --num-cpus=96 \
+                  --disable-usage-stats
+                # Wait for the worker to register before starting vLLM
+                until [ "$(ray status 2>/dev/null | awk '/GPU/{print $1}' | head -n1 | tr -d '/.0')" -ge 16 ]; do
+                  echo "Waiting for 16 GPUs in the Ray cluster..."
+                  sleep 5
+                done
+                exec python -m vllm.entrypoints.openai.api_server \
+                  --host=0.0.0.0 \
+                  --port=8000 \
+                  --model=/workspace/models/nemotron-3-super-bf16 \
+                  --served-model-name=nemotron-super \
+                  --tensor-parallel-size=8 \
+                  --pipeline-parallel-size=2 \
+                  --distributed-executor-backend=ray \
+                  --max-model-len=8192 \
+                  --max-num-seqs=4 \
+                  --gpu-memory-utilization=0.92 \
+                  --dtype=auto \
+                  --trust-remote-code \
+                  --enable-auto-tool-choice \
+                  --tool-call-parser=qwen3_coder \
+                  --reasoning-parser-plugin=/workspace/models/nemotron-3-super-bf16/super_v3_reasoning_parser.py \
+                  --reasoning-parser=super_v3
+            env:
+              - name: FI_PROVIDER
+                value: "efa"
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_SOCKET_IFNAME
+                value: "^lo,docker"
+            ports:
+              - name: http
+                containerPort: 8000
+              - name: ray
+                containerPort: 6379
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+                vpc.amazonaws.com/efa: 1
+                hugepages-2Mi: 5120Mi
+              requests:
+                cpu: "96"
+                memory: 600Gi
+                nvidia.com/gpu: 8
+                vpc.amazonaws.com/efa: 1
+                hugepages-2Mi: 5120Mi
+            securityContext:
+              privileged: true
+              capabilities:
+                add: ["IPC_LOCK"]
+            volumeMounts:
+              - name: models
+                mountPath: /workspace/models
+                readOnly: true
+              - name: shm
+                mountPath: /dev/shm
+              - name: hugepages
+                mountPath: /hugepages-2Mi
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 300
+              periodSeconds: 15
+              timeoutSeconds: 10
+              failureThreshold: 60
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 180
+              periodSeconds: 30
+              timeoutSeconds: 10
+              failureThreshold: 80
+        volumes:
+          - name: models
+            persistentVolumeClaim:
+              claimName: nemotron-super-models
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 30Gi
+          - name: hugepages
+            emptyDir:
+              medium: HugePages-2Mi
+    workerTemplate:
+      metadata:
+        labels:
+          app: vllm-nemotron-super
+          role: worker
+      spec:
+        nodeSelector:
+          role: gpu-worker
+        containers:
+          - name: vllm-worker
+            image: 763104351884.dkr.ecr.${AWS_REGION}.amazonaws.com/vllm:0.20.0-gpu-py312-cu130-ubuntu22.04-ec2
+            command: ["bash", "-c"]
+            args:
+              - |
+                set -euo pipefail
+                # Ray isn't preinstalled in the vLLM DLC — install it before joining
+                pip install --quiet --no-cache-dir "ray[default]"
+                exec ray start \
+                  --address=${LWS_LEADER_ADDRESS}:6379 \
+                  --num-gpus=8 \
+                  --num-cpus=96 \
+                  --disable-usage-stats \
+                  --block
+            env:
+              - name: LWS_LEADER_ADDRESS
+                value: "vllm-nemotron-super-0.vllm-nemotron-super"
+              - name: FI_PROVIDER
+                value: "efa"
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_SOCKET_IFNAME
+                value: "^lo,docker"
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+                vpc.amazonaws.com/efa: 1
+                hugepages-2Mi: 5120Mi
+              requests:
+                cpu: "96"
+                memory: 600Gi
+                nvidia.com/gpu: 8
+                vpc.amazonaws.com/efa: 1
+                hugepages-2Mi: 5120Mi
+            securityContext:
+              privileged: true
+              capabilities:
+                add: ["IPC_LOCK"]
+            volumeMounts:
+              - name: models
+                mountPath: /workspace/models
+                readOnly: true
+              - name: shm
+                mountPath: /dev/shm
+              - name: hugepages
+                mountPath: /hugepages-2Mi
+        volumes:
+          - name: models
+            persistentVolumeClaim:
+              claimName: nemotron-super-models
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 30Gi
+          - name: hugepages
+            emptyDir:
+              medium: HugePages-2Mi

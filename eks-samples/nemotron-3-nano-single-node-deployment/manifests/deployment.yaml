@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-nemotron
+  labels:
+    app: vllm-nemotron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-nemotron
+  template:
+    metadata:
+      labels:
+        app: vllm-nemotron
+    spec:
+      nodeSelector:
+        role: gpu-worker
+      containers:
+        - name: vllm
+          image: 763104351884.dkr.ecr.${AWS_REGION}.amazonaws.com/vllm:0.20.0-gpu-py312-cu130-ubuntu22.04-ec2
+          args:
+            - "--model=/models/nemotron-3-nano-bf16"
+            - "--served-model-name=nemotron"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--tensor-parallel-size=4"
+            - "--max-model-len=16384"
+            - "--gpu-memory-utilization=0.90"
+            - "--dtype=auto"
+            - "--trust-remote-code"
+            - "--enable-auto-tool-choice"
+            - "--tool-call-parser=qwen3_coder"
+            - "--reasoning-parser-plugin=/models/nemotron-3-nano-bf16/nano_v3_reasoning_parser.py"
+            - "--reasoning-parser=nano_v3"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: 4
+            requests:
+              cpu: "16"
+              memory: 120Gi
+              nvidia.com/gpu: 4
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 80
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: nemotron-models
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
