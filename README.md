@@ -41,10 +41,18 @@ These samples are provided as community examples and are not covered by NVIDIA E
 
 ## Samples
 
-Samples are organized by AWS service:
+Samples are organized first by **use case**, then by the **AWS service** they run on (e.g. SageMaker, Bedrock, EKS).
 
-- [`bedrock-samples/`](./bedrock-samples) — Samples that run on [Amazon Bedrock](https://aws.amazon.com/bedrock/), fully managed serverless inference.
-- [`eks-samples/`](./eks-samples) — Samples that run on [Amazon Elastic Kubernetes Service (EKS)](https://aws.amazon.com/eks/), self-managed deployment on Kubernetes.
+| Use case | Description | Status |
+|---|---|---|
+| [`inference/`](./inference) | Serving and running inference | Available |
+| `agentic/` | Agentic workflows and tool-using applications | Planned |
+| `training/` | Model training and fine-tuning | Planned |
+| `data-processing/` | Data curation and processing pipelines | Planned |
+| `physical-ai/` | Robotics and simulation workloads | Planned |
+| `industry-solutions/` | Industry-specific solutions | Planned |
+
+Within each use case, samples are grouped by AWS service. For example, under `inference/` you'll find `bedrock/` and `eks/`, each containing self-contained samples with their own README.
 
 ## Usage
 
