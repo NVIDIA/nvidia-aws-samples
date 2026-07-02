@@ -41,3 +41,8 @@ credentials
 *.safetensors
 *.gguf
 .cache/huggingface/
+
+# Node / AWS CDK (see inference/eks/nim/nim-eks-cdk)
+node_modules/
+package-lock.json
+cdk.out/
