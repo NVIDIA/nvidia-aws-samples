@@ -46,7 +46,7 @@ Samples are organized first by **use case**, then by the **AWS service** they ru
 | Use case | Description | Status |
 |---|---|---|
 | [`inference/`](./inference) | Serving and running inference | Available |
-| `agentic/` | Agentic workflows and tool-using applications | Planned |
+| [`agentic/`](./agentic) | Agentic workflows and tool-using applications | Available |
 | `training/` | Model training and fine-tuning | Planned |
 | `data-processing/` | Data curation and processing pipelines | Planned |
 | `physical-ai/` | Robotics and simulation workloads | Planned |
