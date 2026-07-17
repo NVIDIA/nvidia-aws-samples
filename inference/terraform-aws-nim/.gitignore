@@ -1,0 +1,64 @@
+.DS_Store
+
+# Module — generated .env — NEVER commit (contains NGC_API_KEY / HF_TOKEN)
+.env
+
+# Generated build artifacts (archive_file output, etc.)
+**/tmp/
+
+# ---------------------------------------------------------------------------
+# Terraform standard ignores (based on aws-ia convention)
+# ---------------------------------------------------------------------------
+
+# Local .terraform directories
+**/.terraform/*
+
+# State files
+*.tfstate
+*.tfstate.*
+**/.terraform.tfstate.lock.info
+
+# Crash log files
+crash.log
+crash.*.log
+
+# .tfvars files — likely to contain sensitive data
+# Exception: *.tfvars.example files are safe to commit as documentation
+*.tfvars
+*.tfvars.json
+!**/*.tfvars.example
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Plan files
+*tfplan*
+*.tfplan
+plan.out
+plan.out.json
+
+# CLI configuration files
+.terraformrc
+terraform.rc
+
+# Lock files
+.terraform.lock.hcl
+
+# Go (used in some terraform test helpers)
+go.mod
+go.sum
+
+# Build directory
+build/
+
+# Claude Code — local IDE settings stay off git. Project-wide rules
+# live in .claude/CLAUDE.md + .claude/rules/ (tracked).
+.claude/settings.local.json
+.claude/settings.json
+
+# Playwright MCP server writes screenshots/session data here during
+# browser-based debugging sessions. Local-only, not project state.
+.playwright-mcp/

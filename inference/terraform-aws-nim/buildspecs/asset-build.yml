@@ -1,0 +1,125 @@
+# version: 0.2
+
+# # ---------------------------------------------------------------------------
+# # FUTURE PR — Custom NIM Build Path (enable_asset_build)
+# #
+# # This buildspec is retained for the Future PR that re-enables the custom
+# # NIM build path (HF weights → ONNX → TRT engines → S3).
+# # The corresponding codebuild.tf resources are currently commented out.
+# # Do not modify or delete this file.
+# #
+# # ---------------------------------------------------------------------------
+# # Asset Build — GPU CodeBuild project (var.enable_asset_build = true)
+# #
+# # Runs asset-build.sh inside the NIM shim container to build TRT engines from
+# # HuggingFace weights (HF → ONNX → TRT) and upload them to the S3 asset cache.
+# #
+# # This project uses a CodeBuild reserved capacity fleet with the exact same GPU
+# # instance type as sagemaker_config.instance_type. TRT engines are NOT portable
+# # across SM versions — the fleet MUST match:
+# #   g5  (A10G/SM86), g6/g6e (L4/L40S/SM89), p4d/p5 (A100/H100/SM80/SM90)
+# #
+# # This build is idempotent: if S3 already contains a warm cache at
+# # s3://$S3_BUCKET/$ASSET_CACHE_PREFIX/, the build exits immediately.
+# #
+# # Environment variables (set by codebuild.tf):
+# #   ECR_REPO_URI       — ECR repo URI
+# #   BASE_SYNC_PROJECT  — name of the base-sync project to poll
+# #   SHIM_TAG           — shim image tag (default: "shim")
+# #   S3_BUCKET          — S3 bucket for asset cache
+# #   ASSET_CACHE_PREFIX — S3 key prefix (e.g. "nim-cache/g6e.12xlarge")
+# #   CACHE_PATH         — container path where NIM reads cached artifacts
+# #   HF_TOKEN           — HuggingFace token (REQUIRED for weight download)
+# #   NGC_API_KEY        — NGC API key
+# #   AWS_DEFAULT_REGION — region
+# # ---------------------------------------------------------------------------
+
+# phases:
+#   pre_build:
+#     commands:
+#       # ── GPU architecture verification ────────────────────────────────────────
+#       - echo "=== GPU detection ==="
+#       - |
+#         GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+#         COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
+#         echo "GPU: $GPU_NAME  |  Compute capability: $COMPUTE_CAP"
+#         echo "ASSET_CACHE_PREFIX: $ASSET_CACHE_PREFIX"
+
+#         # SM 8.6 → A10G (g5), SM 8.9 → L4/L40S (g6/g6e), SM 8.0 → A100 (p4d), SM 9.0 → H100 (p5)
+#         case "$COMPUTE_CAP" in
+#           "8.6") EXPECTED_ARCH="g5" ;;
+#           "8.9") EXPECTED_ARCH="g6" ;;
+#           "8.0") EXPECTED_ARCH="p4d" ;;
+#           "9.0") EXPECTED_ARCH="p5" ;;
+#           *)
+#             echo "WARNING: unrecognised compute capability $COMPUTE_CAP — skipping arch check"
+#             EXPECTED_ARCH=""
+#             ;;
+#         esac
+
+#         if [ -n "$EXPECTED_ARCH" ] && ! echo "$ASSET_CACHE_PREFIX" | grep -qE "$EXPECTED_ARCH"; then
+#           echo "ERROR: GPU compute capability $COMPUTE_CAP expects prefix matching '$EXPECTED_ARCH'"
+#           echo "       but ASSET_CACHE_PREFIX='$ASSET_CACHE_PREFIX'"
+#           echo "       Fleet instance type does not match sagemaker_config.instance_type."
+#           exit 1
+#         fi
+#         echo "GPU architecture validated."
+
+#       # ── S3 idempotency check ─────────────────────────────────────────────────
+#       - echo "=== Checking S3 asset cache ==="
+#       - |
+#         if aws s3 ls "s3://$S3_BUCKET/$ASSET_CACHE_PREFIX/" 2>/dev/null | grep -q .; then
+#           echo "S3 cache already populated at s3://$S3_BUCKET/$ASSET_CACHE_PREFIX/"
+#           echo "Skipping rebuild — cache is warm."
+#           echo "CACHE_HIT=true" >> $CODEBUILD_SRC_DIR/cache_status.env
+#         else
+#           echo "No cache found — proceeding with build."
+#           echo "CACHE_HIT=false" >> $CODEBUILD_SRC_DIR/cache_status.env
+#         fi
+
+#       - echo "=== Waiting for base-sync to complete ==="
+#       - |
+#         for i in $(seq 1 60); do
+#           RUNNING=$(aws codebuild list-builds-for-project \
+#             --project-name "$BASE_SYNC_PROJECT" \
+#             --query 'ids' --output text 2>/dev/null || echo "")
+#           if [ -z "$RUNNING" ]; then
+#             echo "No builds found for $BASE_SYNC_PROJECT — assuming complete."
+#             break
+#           fi
+#           IN_PROGRESS=$(aws codebuild batch-get-builds --ids $RUNNING \
+#             --query 'builds[?buildStatus==`IN_PROGRESS`].id' --output text)
+#           if [ -z "$IN_PROGRESS" ]; then
+#             echo "base-sync complete — proceeding."
+#             break
+#           fi
+#           echo "[$i/60] base-sync in progress — waiting 10 s..."
+#           sleep 10
+#         done
+
+#       - echo "=== Authenticating with ECR ==="
+#       - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+
+#   build:
+#     commands:
+#       - source $CODEBUILD_SRC_DIR/cache_status.env || true
+#       - |
+#         if [ "${CACHE_HIT:-false}" = "true" ]; then
+#           echo "Cache hit — nothing to build."
+#           exit 0
+#         fi
+
+#         echo "=== Running asset-build.sh inside NIM shim container ==="
+#         docker run --rm --gpus all \
+#           -e ASSET_CACHE="s3://$S3_BUCKET/$ASSET_CACHE_PREFIX" \
+#           -e HF_TOKEN="${HF_TOKEN:-}" \
+#           -e PRECISION="${PRECISION:-fp16}" \
+#           -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+#           "$ECR_REPO_URI:$SHIM_TAG" \
+#           bash /opt/asset-build.sh
+
+#   post_build:
+#     commands:
+#       - echo "=== Asset build complete. Cache at s3://$S3_BUCKET/$ASSET_CACHE_PREFIX ==="
+#       - |
+#         aws s3 ls "s3://$S3_BUCKET/$ASSET_CACHE_PREFIX/" --recursive --human-readable | head -20

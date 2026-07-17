@@ -1,0 +1,684 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - '[ "$VERBOSE" = "true" ] && set -x || true'
+      - |
+        curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl && mv kubectl /usr/local/bin/
+      - 'curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
+      - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+  pre_build:
+    commands:
+      # Poll GPU NodePool — cluster-setup may still be running (GH #37930).
+      - |
+        echo "Waiting for GPU NodePool ${NODE_POOL_NAME} to be ready..."
+        for i in $(seq 1 40); do
+          if kubectl get nodepool "${NODE_POOL_NAME}" >/dev/null 2>&1; then
+            echo "NodePool ${NODE_POOL_NAME} found."
+            break
+          fi
+          if [ "$i" -eq 40 ]; then
+            echo "ERROR: NodePool ${NODE_POOL_NAME} not found after 20 minutes."
+            exit 1
+          fi
+          echo "  attempt $i/40 - sleeping 30s..."
+          sleep 30
+        done
+
+      # Create namespace
+      - 'kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -'
+
+      # NGC API key Kubernetes secret (required for NIM license validation at pod startup)
+      - |
+        kubectl create secret generic ngc-api-key \
+          --namespace "$NAMESPACE" \
+          --from-literal=NGC_API_KEY="${NGC_API_KEY}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+      # Service account with IRSA annotation (grants S3 read for init container cache sync)
+      - |
+        cat > /tmp/nim-sa.yaml <<EOF
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: nim-sa
+          namespace: ${NAMESPACE}
+          annotations:
+            eks.amazonaws.com/role-arn: "${NIM_IRSA_ROLE_ARN}"
+        EOF
+      - kubectl apply -f /tmp/nim-sa.yaml
+
+      # Fetch Helm chart (NIM HTTP path only). Two sources: HELM_CHART_S3_URI
+      # (custom .tgz on S3) or HELM_CHART_VERSION (pinned NGC fetch — required
+      # because NGC exposes no chart index, so helm repo add/pull don't work).
+      - |
+        # Skip chart fetch for open-weight (MODEL_ID set) and gRPC (raw kubectl path,
+        # bypasses Helm entirely). Only the NIM HTTP Helm path needs a chart.
+        if [ -z "${MODEL_ID}" ] && [ "${PROTOCOL}" != "grpc" ]; then
+          if [ -n "${HELM_CHART_S3_URI}" ]; then
+            aws s3 cp "${HELM_CHART_S3_URI}" .
+          elif [ -n "${HELM_CHART_VERSION}" ]; then
+            helm fetch "${HELM_CHART_REPO_URL}/${HELM_CHART_NAME}-${HELM_CHART_VERSION}.tgz" \
+              --username='$oauthtoken' --password="${NGC_API_KEY}"
+          else
+            echo "ERROR: helm_chart_version is required for NGC Helm charts."
+            echo "NGC does not expose a searchable chart index — a specific version must be pinned."
+            echo "Set helm_chart_version in your eks_deployments configuration."
+            exit 1
+          fi
+          CHART_FILE=$(ls *.tgz | head -1)
+          echo "Using chart: ${CHART_FILE}"
+        fi
+
+  build:
+    commands:
+      - '[ "$LOAD_BALANCER_INTERNAL" = "true" ] && LB_SCHEME="internal" || LB_SCHEME="internet-facing"'
+
+      # Open-weight: raw kubectl Deployment+Service. Init syncs weights from
+      # S3; main runs vllm serve. NIM path is the Helm flow below.
+      - |
+        if [ -n "${MODEL_ID}" ]; then
+          # Additional init container YAML for heredoc injection.
+          OW_ADDITIONAL_INIT_CONTAINERS=""
+          if [ -n "${ADDITIONAL_SCRIPTS}" ]; then
+            i=0
+            OW_ADDITIONAL_INIT_CONTAINERS=$(echo "${ADDITIONAL_SCRIPTS}" | while IFS= read -r uri; do
+              [ -z "$uri" ] && continue
+              # Indents below match the manifest hierarchy: list items at col 8
+              # (sibling of `- name: weights-sync`), mapping keys at col 10, etc.
+              printf '        - name: additional-script-%d\n' "$i"
+              printf '          image: amazon/aws-cli:latest\n'
+              printf '          command: ["/bin/sh", "-c"]\n'
+              printf '          args:\n'
+              printf '            - |\n'
+              printf '              echo "Running additional script [%d]: %s"\n' "$i" "$uri"
+              printf '              aws s3 cp "%s" /tmp/script.sh\n' "$uri"
+              printf '              chmod +x /tmp/script.sh && /tmp/script.sh\n'
+              printf '          env:\n'
+              printf '            - name: AWS_DEFAULT_REGION\n'
+              printf '              value: "%s"\n' "${AWS_REGION}"
+              printf '          volumeMounts:\n'
+              printf '            - name: model-weights\n'
+              printf '              mountPath: /opt/ml/model\n'
+              i=$((i + 1))
+            done)
+          fi
+          cat > /tmp/ow-manifest.yaml <<EOF
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${RELEASE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          # 3600s = 1h — NIM cold-start can exceed the k8s default of 600s.
+          progressDeadlineSeconds: 3600
+          replicas: ${REPLICAS}
+          selector:
+            matchLabels:
+              app: ${RELEASE_NAME}
+          template:
+            metadata:
+              labels:
+                app: ${RELEASE_NAME}
+            spec:
+              serviceAccountName: nim-sa
+              initContainers:
+                - name: weights-sync
+                  image: amazon/aws-cli:latest
+                  command:
+                    - /bin/sh
+                    - -c
+                    - |
+                      echo "Syncing model weights from s3://${MODEL_ASSETS_BUCKET}/${WEIGHTS_S3_PREFIX}/ ..."
+                      aws s3 sync "s3://${MODEL_ASSETS_BUCKET}/${WEIGHTS_S3_PREFIX}/" /opt/ml/model/ --no-progress
+                      echo "Weight sync complete."
+                  env:
+                    - name: AWS_DEFAULT_REGION
+                      value: "${AWS_REGION}"
+                  volumeMounts:
+                    - name: model-weights
+                      mountPath: /opt/ml/model
+        ${OW_ADDITIONAL_INIT_CONTAINERS}
+              containers:
+                - name: vllm
+                  image: vllm/vllm-openai:latest
+                  command:
+                    - /bin/sh
+                    - -c
+                    - vllm serve /opt/ml/model --port 8000 --served-model-name "${MODEL_ID}" ${EXTRA_ARGS}
+                  ports:
+                    - name: http
+                      containerPort: 8000
+                  env:
+                    - name: AWS_DEFAULT_REGION
+                      value: "${AWS_REGION}"
+                  resources:
+                    limits:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                    requests:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                  volumeMounts:
+                    - name: model-weights
+                      mountPath: /opt/ml/model
+              volumes:
+                - name: model-weights
+                  emptyDir: {}
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${RELEASE_NAME}-svc
+          namespace: ${NAMESPACE}
+          # Labels — SM selector target on autoscaling path.
+          labels:
+            app.kubernetes.io/instance: ${RELEASE_NAME}
+            app.kubernetes.io/name: ${RELEASE_NAME}
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: external
+            service.beta.kubernetes.io/aws-load-balancer-scheme: ${LB_SCHEME}
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+            service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+        spec:
+          selector:
+            app: ${RELEASE_NAME}
+          type: LoadBalancer
+          loadBalancerClass: eks.amazonaws.com/nlb
+          ports:
+            - name: http
+              port: 8000
+              targetPort: 8000
+        EOF
+          # Log the generated manifest.
+          echo "=== /tmp/ow-manifest.yaml ==="
+          cat -n /tmp/ow-manifest.yaml
+          echo "=== end /tmp/ow-manifest.yaml ==="
+
+          kubectl apply -f /tmp/ow-manifest.yaml
+          kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
+
+        else
+
+          if [ "$PROTOCOL" = "grpc" ]; then
+
+            # gRPC NIM path: raw kubectl Deployment+Service. Used when no NGC
+            # Helm chart exists (Maxine media NIMs). See DEVELOPER_REFERENCE.md.
+
+            # Additional-script init container YAML gen. No shared volume on
+            # gRPC path (init containers can't share files with the NIM).
+            GRPC_ADDITIONAL_INIT_CONTAINERS=""
+            if [ -n "${ADDITIONAL_SCRIPTS}" ]; then
+              i=0
+              GRPC_ADDITIONAL_INIT_CONTAINERS=$(echo "${ADDITIONAL_SCRIPTS}" | while IFS= read -r uri; do
+                [ -z "$uri" ] && continue
+                printf '        - name: additional-script-%d\n' "$i"
+                printf '          image: amazon/aws-cli:latest\n'
+                printf '          command: ["/bin/sh", "-c"]\n'
+                printf '          args:\n'
+                printf '            - |\n'
+                printf '              echo "Running additional script [%d]: %s"\n' "$i" "$uri"
+                printf '              aws s3 cp "%s" /tmp/script.sh\n' "$uri"
+                printf '              chmod +x /tmp/script.sh && /tmp/script.sh\n'
+                printf '          env:\n'
+                printf '            - name: AWS_DEFAULT_REGION\n'
+                printf '              value: "%s"\n' "${AWS_REGION}"
+                i=$((i + 1))
+              done)
+            fi
+
+            cat > /tmp/grpc-nim-manifest.yaml <<EOF
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${RELEASE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          # 3600s = 1h — SVD cold-start ~15 min, well above k8s default 600s.
+          progressDeadlineSeconds: 3600
+          replicas: ${REPLICAS}
+          selector:
+            matchLabels:
+              app: ${RELEASE_NAME}
+          template:
+            metadata:
+              labels:
+                app: ${RELEASE_NAME}
+                app.kubernetes.io/instance: ${RELEASE_NAME}
+            spec:
+              serviceAccountName: nim-sa
+              initContainers:
+        ${GRPC_ADDITIONAL_INIT_CONTAINERS}
+              containers:
+                - name: nim
+                  image: ${ECR_IMAGE_REPOSITORY}:${ECR_IMAGE_TAG}
+                  imagePullPolicy: IfNotPresent
+                  env:
+                    - name: NGC_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ngc-api-key
+                          key: NGC_API_KEY
+                  ports:
+                    - name: grpc
+                      containerPort: ${PORT}
+                      protocol: TCP
+                  resources:
+                    limits:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                    requests:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+                  # timeoutSeconds default is 1s — way too tight for a
+                  # GPU-saturated pod under sustained load. Bumping to 10s so
+                  # busy Maxine NIMs (SVD, etc.) don't get spuriously killed
+                  # by liveness while actively processing videos. Observed
+                  # empirically on g4dn.2xlarge SVD under 5-concurrent load.
+                  readinessProbe:
+                    grpc:
+                      port: ${PORT}
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 10
+                    failureThreshold: 60
+                  livenessProbe:
+                    grpc:
+                      port: ${PORT}
+                    initialDelaySeconds: 120
+                    periodSeconds: 30
+                    timeoutSeconds: 10
+                    failureThreshold: 10
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 8Gi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${RELEASE_NAME}-svc
+          namespace: ${NAMESPACE}
+          # Labels for uniform `kubectl get svc -l` discovery. gRPC path
+          # has no SM (Maxine /v1/metrics has no request-load signal) —
+          # autoscaling uses DCGM_FI_DEV_GPU_UTIL.
+          labels:
+            app.kubernetes.io/instance: ${RELEASE_NAME}
+            app.kubernetes.io/name: ${RELEASE_NAME}
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: external
+            service.beta.kubernetes.io/aws-load-balancer-scheme: ${LB_SCHEME}
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+            service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+        spec:
+          selector:
+            app: ${RELEASE_NAME}
+          type: LoadBalancer
+          loadBalancerClass: eks.amazonaws.com/nlb
+          ports:
+            - name: grpc
+              port: ${PORT}
+              targetPort: ${PORT}
+              protocol: TCP
+              appProtocol: kubernetes.io/grpc
+        EOF
+
+            # Log the generated manifest.
+            echo "=== /tmp/grpc-nim-manifest.yaml ==="
+            cat -n /tmp/grpc-nim-manifest.yaml
+            echo "=== end /tmp/grpc-nim-manifest.yaml ==="
+
+            kubectl apply -f /tmp/grpc-nim-manifest.yaml
+            kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
+
+          else
+
+          # Helm values per NIM_TYPE. Riva uses base64 NGC key
+          # (ngcCredentials.password); custom relies on helm_values_override.
+          # Autoscaling → enable chart's built-in ServiceMonitor with kps
+          # release label. Chart handles the port name (http-openai) and path.
+          if [ "$AUTOSCALING_ENABLED" = "true" ]; then
+            METRICS_VALUES_BLOCK=$(cat <<EOF
+
+        metrics:
+          enabled: true
+          serviceMonitor:
+            enabled: true
+            additionalLabels:
+              release: kps
+        EOF
+        )
+          else
+            METRICS_VALUES_BLOCK=""
+          fi
+
+          case "${NIM_TYPE}" in
+            llm | vlm | embedding | reranking)
+              # Shared NIM-LLM chart schema for nim-llm / nim-vlm /
+              # text-embedding-nim / text-reranking-nim. Metrics key structure
+              # for embedding/reranking may vary — inspect chart values.yaml
+              # if scraping doesn't work.
+              cat > /tmp/nim-values.yaml <<EOF
+        image:
+          repository: "${ECR_IMAGE_REPOSITORY}"
+          tag: "${ECR_IMAGE_TAG}"
+          pullPolicy: IfNotPresent
+
+        imagePullSecrets: []
+
+        serviceAccount:
+          create: false
+          name: "nim-sa"
+
+        model:
+          ngcAPISecret: ngc-api-key
+
+        resources:
+          limits:
+            nvidia.com/gpu: "${GPU_COUNT}"
+          requests:
+            nvidia.com/gpu: "${GPU_COUNT}"
+
+        replicaCount: ${REPLICAS}
+
+        service:
+          type: LoadBalancer
+          port: ${PORT}
+          loadBalancerClass: "eks.amazonaws.com/nlb"
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: "external"
+            service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+            service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+
+        persistence:
+          enabled: false
+        ${METRICS_VALUES_BLOCK}
+        EOF
+              ;;
+            speech)
+              NGC_KEY_B64=$(printf '%s' "${NGC_API_KEY}" | base64 | tr -d '\n')
+              cat > /tmp/nim-values.yaml <<EOF
+        image:
+          repository: "${ECR_IMAGE_REPOSITORY}"
+          tag: "${ECR_IMAGE_TAG}"
+          pullPolicy: IfNotPresent
+
+        replicaCount: ${REPLICAS}
+
+        ngcCredentials:
+          password: "${NGC_KEY_B64}"
+
+        service:
+          type: LoadBalancer
+          loadBalancerClass: "eks.amazonaws.com/nlb"
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: "external"
+            service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+            service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+        EOF
+              ;;
+            custom)
+              touch /tmp/nim-values.yaml
+              ;;
+          esac
+
+          # S3 cache sync init container (llm/embedding only). Charts already
+          # define a model-store emptyDir at /model-store — mount the same.
+          if [ "${ENABLE_MODEL_PROFILE_CACHE}" = "true" ] && [ -n "${CACHE_BUCKET}" ] && \
+             { [ "${NIM_TYPE}" = "llm" ] || [ "${NIM_TYPE}" = "embedding" ]; }; then
+            cat >> /tmp/nim-values.yaml <<EOF
+
+        extraInitContainers:
+          - name: cache-sync
+            image: amazon/aws-cli:latest
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                echo "Syncing model profile cache from s3://${CACHE_BUCKET}/${CACHE_PREFIX}/ ..."
+                aws s3 sync "s3://${CACHE_BUCKET}/${CACHE_PREFIX}/" /model-store/
+                echo "Cache sync complete."
+            env:
+              - name: AWS_DEFAULT_REGION
+                value: "${AWS_REGION}"
+            volumeMounts:
+              - name: model-store
+                mountPath: /model-store
+        EOF
+          fi
+
+          # Additional scripts — one init container per S3 URI in
+          # ADDITIONAL_SCRIPTS (newline-separated). Run in order before NIM.
+          if [ -n "${ADDITIONAL_SCRIPTS}" ]; then
+            if ! grep -q "^extraInitContainers:" /tmp/nim-values.yaml; then
+              cat >> /tmp/nim-values.yaml <<EOF
+
+        extraInitContainers:
+        EOF
+            fi
+            i=0
+            echo "${ADDITIONAL_SCRIPTS}" | while IFS= read -r uri; do
+              cat >> /tmp/nim-values.yaml <<EOF
+          - name: additional-script-${i}
+            image: amazon/aws-cli:latest
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                echo "Running additional script [${i}]: ${uri}"
+                aws s3 cp "${uri}" /tmp/script.sh
+                chmod +x /tmp/script.sh && /tmp/script.sh
+            env:
+              - name: AWS_DEFAULT_REGION
+                value: "${AWS_REGION}"
+        EOF
+              i=$((i + 1))
+            done
+          fi
+
+          # User values override (applied last; wins on conflicts).
+          if [ -n "${HELM_VALUES_OVERRIDE}" ]; then
+            printf '%s' "${HELM_VALUES_OVERRIDE}" > /tmp/nim-values-override.yaml
+            OVERRIDE_FLAG="-f /tmp/nim-values-override.yaml"
+          else
+            OVERRIDE_FLAG=""
+          fi
+
+          # Reset stuck Helm state (pending-*) from an interrupted build.
+          HELM_STATUS=$(helm status "$RELEASE_NAME" --namespace "$NAMESPACE" 2>/dev/null | grep "^STATUS:" | awk '{print $2}' || true)
+          if echo "$HELM_STATUS" | grep -q "^pending"; then
+            echo "Helm release stuck in ${HELM_STATUS} — uninstalling to reset state..."
+            helm uninstall "$RELEASE_NAME" --namespace "$NAMESPACE" --wait 2>/dev/null || true
+          fi
+
+          # Log the generated values.
+          echo "=== /tmp/nim-values.yaml ==="
+          cat -n /tmp/nim-values.yaml
+          echo "=== end /tmp/nim-values.yaml ==="
+
+          [ "$VERBOSE" = "true" ] && HELM_FLAGS="--debug" || HELM_FLAGS=""
+          helm upgrade --install "$RELEASE_NAME" "$CHART_FILE" \
+            --namespace "$NAMESPACE" \
+            -f /tmp/nim-values.yaml \
+            $OVERRIDE_FLAG \
+            --cleanup-on-fail \
+            --wait \
+            --timeout 90m \
+            $HELM_FLAGS
+
+          fi  # close PROTOCOL = "grpc" check
+
+        fi  # close MODEL_ID check (open-weight vs NIM path)
+
+      # -----------------------------------------------------------------
+      # Autoscaling: emit KEDA ScaledObject + (open-weight only) ServiceMonitor.
+      #
+      # Per-path shape:
+      #   NIM Helm path — chart's own ServiceMonitor is enabled via
+      #     metrics.serviceMonitor.enabled=true in the values file above.
+      #     Chart knows its Service port name (http-openai for nim-llm) and
+      #     metrics path (/v1/metrics) already; nothing to emit here.
+      #   Open-weight (vLLM direct) path — we own the manifest; emit a
+      #     ServiceMonitor scraping /metrics on port `http` (vLLM's default,
+      #     NOT the /v1/metrics NIM chart uses).
+      #   gRPC (Maxine) path — Maxine NIMs expose only GPU/process
+      #     telemetry on /v1/metrics (no request-load signal). Scaling
+      #     signal is DCGM_FI_DEV_GPU_UTIL, which dcgm-exporter's own
+      #     ServiceMonitor already scrapes cluster-wide. No per-deployment
+      #     ServiceMonitor needed.
+      #
+      # Deployment-name resolution differs by path:
+      #   kubectl paths (open-weight, gRPC) → RELEASE_NAME is the Deployment name
+      #   NIM Helm path                     → chart controls the name; look it up
+      #
+      # KEDA quirks worth knowing:
+      #   * cooldownPeriod only controls scale-to-zero (min_replicas=0 case);
+      #     for the common min_replicas>=1 case it does nothing. General
+      #     scale-down delay is HPA's behavior.scaleDown.stabilizationWindow.
+      #   * KEDA creates an underlying HPA (keda-hpa-<name>); the behavior
+      #     block flows straight through.
+      #
+      # See DEVELOPER_REFERENCE.md "Autoscaling design" for the vllm: prefix
+      # subtlety, chart-flag rationale, and adoption trade-off vs. operator.
+      # -----------------------------------------------------------------
+      - |
+        if [ "$AUTOSCALING_ENABLED" = "true" ]; then
+          # Kubectl paths (open-weight, gRPC) emit a Deployment we control.
+          # NIM Helm charts vary — nim-llm/nim-vlm use StatefulSet (stable pod
+          # identity for the model cache PVC), embedding/reranking may use
+          # Deployment. Detect at runtime and set scaleTargetRef.kind accordingly.
+          if [ -n "${MODEL_ID}" ] || [ "$PROTOCOL" = "grpc" ]; then
+            TARGET_KIND="Deployment"
+            TARGET_NAME="${RELEASE_NAME}"
+          else
+            TARGET_NAME=$(kubectl get deployment -n "$NAMESPACE" \
+              -l "app.kubernetes.io/instance=${RELEASE_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            TARGET_KIND="Deployment"
+            if [ -z "$TARGET_NAME" ]; then
+              TARGET_NAME=$(kubectl get statefulset -n "$NAMESPACE" \
+                -l "app.kubernetes.io/instance=${RELEASE_NAME}" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              TARGET_KIND="StatefulSet"
+            fi
+            if [ -z "$TARGET_NAME" ]; then
+              echo "ERROR: no Deployment or StatefulSet with label app.kubernetes.io/instance=${RELEASE_NAME} found in ${NAMESPACE}"
+              exit 1
+            fi
+          fi
+          echo "Autoscaling target: ${TARGET_KIND}/${TARGET_NAME}"
+
+          # Open-weight (vLLM direct) needs a ServiceMonitor — we control
+          # the Service manifest and NIM's chart isn't involved. Path is
+          # /metrics (vLLM native), NOT /v1/metrics (NIM's OpenAI-compat prefix).
+          if [ -n "${MODEL_ID}" ]; then
+            cat > /tmp/service-monitor.yaml <<EOF
+        apiVersion: monitoring.coreos.com/v1
+        kind: ServiceMonitor
+        metadata:
+          name: ${RELEASE_NAME}-metrics
+          namespace: ${NAMESPACE}
+          labels:
+            release: kps
+        spec:
+          selector:
+            matchLabels:
+              app.kubernetes.io/instance: ${RELEASE_NAME}
+          namespaceSelector:
+            matchNames:
+              - ${NAMESPACE}
+          endpoints:
+            - port: http
+              path: /metrics
+              interval: 30s
+        EOF
+            kubectl apply -f /tmp/service-monitor.yaml
+          fi
+
+          # Per-deployment scoped query. Both NIM /metrics and DCGM emit
+          # short `namespace`/`pod` labels (kps SD rewrites; DCGM with
+          # kubernetes.enablePodLabels=true).
+          # Pod-name pattern differs by kind but both match {target}-.*
+          # (Deployment: <name>-<hash>-<hash>; StatefulSet: <name>-0, <name>-1, ...).
+          PROM_QUERY="avg(${AUTOSCALING_METRIC}{namespace=\"${NAMESPACE}\",pod=~\"${TARGET_NAME}-.*\"})"
+
+          cat > /tmp/scaled-object.yaml <<EOF
+        apiVersion: keda.sh/v1alpha1
+        kind: ScaledObject
+        metadata:
+          name: ${RELEASE_NAME}-scaler
+          namespace: ${NAMESPACE}
+        spec:
+          scaleTargetRef:
+            kind: ${TARGET_KIND}
+            name: ${TARGET_NAME}
+          minReplicaCount: ${AUTOSCALING_MIN_REPLICAS}
+          maxReplicaCount: ${AUTOSCALING_MAX_REPLICAS}
+          triggers:
+            - type: prometheus
+              metadata:
+                serverAddress: http://kps-kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+                threshold: "${AUTOSCALING_TARGET_VALUE}"
+                query: ${PROM_QUERY}
+          advanced:
+            horizontalPodAutoscalerConfig:
+              behavior:
+                scaleDown:
+                  # NIMs cold-start slow (5-15 min for large models). Long
+                  # stabilization window prevents replica thrash when load
+                  # oscillates around threshold. Value from module input.
+                  stabilizationWindowSeconds: ${AUTOSCALING_SCALE_DOWN_DELAY}
+                  policies:
+                    - type: Pods
+                      value: 1
+                      periodSeconds: 120
+                scaleUp:
+                  # Aggressive scale-up: react fast to load spikes since
+                  # a new pod takes minutes to warm up regardless.
+                  stabilizationWindowSeconds: 30
+                  policies:
+                    - type: Pods
+                      value: 2
+                      periodSeconds: 60
+        EOF
+          echo "=== /tmp/scaled-object.yaml ==="
+          cat -n /tmp/scaled-object.yaml
+          echo "=== end /tmp/scaled-object.yaml ==="
+
+          kubectl apply -f /tmp/scaled-object.yaml
+          echo "Autoscaling: ${AUTOSCALING_MIN_REPLICAS}-${AUTOSCALING_MAX_REPLICAS} replicas, ${AUTOSCALING_METRIC}@${AUTOSCALING_TARGET_VALUE}, down=${AUTOSCALING_SCALE_DOWN_DELAY}s"
+        fi
+
+  post_build:
+    commands:
+      - |
+        if [ -n "${MODEL_ID}" ]; then
+          # Open-weight (kubectl) — labeled via the manifest's app=<release-name> selector
+          echo "Open-weight deployment ${RELEASE_NAME} complete."
+          kubectl get pods -n "$NAMESPACE" -l "app=${RELEASE_NAME}"
+          LB=$(kubectl get svc -n "$NAMESPACE" "${RELEASE_NAME}-svc" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        elif [ "$PROTOCOL" = "grpc" ]; then
+          # gRPC NIM (kubectl) — same labeling as open-weight (raw manifest)
+          echo "gRPC NIM deployment ${RELEASE_NAME} complete."
+          kubectl get pods -n "$NAMESPACE" -l "app=${RELEASE_NAME}"
+          LB=$(kubectl get svc -n "$NAMESPACE" "${RELEASE_NAME}-svc" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        else
+          # NIM HTTP (Helm) — Helm labels pods with app.kubernetes.io/instance
+          echo "NIM deployment ${RELEASE_NAME} complete."
+          kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE_NAME}"
+          LB=$(kubectl get svc -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE_NAME}" \
+            -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        fi
+        echo "LoadBalancer hostname: ${LB}"
+        if [ "$PROTOCOL" = "grpc" ]; then
+          echo "To smoke-test gRPC: grpcurl -plaintext ${LB}:${PORT} grpc.health.v1.Health/Check"
+        else
+          echo "To invoke: curl http://${LB}:${PORT}/v1/health/ready"
+        fi

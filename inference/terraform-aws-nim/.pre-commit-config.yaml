@@ -1,0 +1,107 @@
+# ---------------------------------------------------------------------------
+# Pre-commit hooks for terraform-aws-nim
+#
+# Preferred workflow (no install needed):
+#   pre-commit run --all-files        # runs all checks: fmt, docs, validate, lint, test
+#
+# Run a single hook:
+#   pre-commit run terraform_fmt --all-files
+#   pre-commit run terraform_test --all-files
+#
+# terraform_test requires AWS credentials in the environment (plan calls AWS APIs).
+#
+# Update hook versions:
+#   pre-commit autoupdate
+# ---------------------------------------------------------------------------
+
+repos:
+  # ---------------------------------------------------------------------------
+  # Security: credential and secret scanning
+  # Runs on ALL files regardless of path — credentials can land anywhere.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args:
+          - --allow-missing-credentials  # don't fail on machines without ~/.aws
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  # ---------------------------------------------------------------------------
+  # Shell script linting
+  # Scoped to shim/ — the only shell scripts in this module.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
+    hooks:
+      - id: shellcheck
+        args: ["--severity=warning"]
+        files: ^shim/
+
+  # ---------------------------------------------------------------------------
+  # Terraform: format, docs, validate, lint
+  #
+  # Uses antonbabenko/pre-commit-terraform which auto-detects which
+  # subdirectory changed and runs each hook per affected directory.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.99.5
+    hooks:
+      # terraform fmt — reformats .tf/.tftest.hcl in place.
+      # Auto-fixes: yes. Stage the result and re-run if files change.
+      - id: terraform_fmt
+        files: .*\.(tf|tfvars|tftest\.hcl)$
+
+      # terraform-docs — injects inputs/outputs table into README.md between
+      # <!-- BEGIN_TF_DOCS --> / <!-- END_TF_DOCS --> markers.
+      # Auto-fixes: yes (writes README.md). Stage and re-run if README changes.
+      # Scoped to module root + submodules. Excluded: examples/ which has a
+      # hand-written README with no auto-generated section.
+      - id: terraform_docs
+        args:
+          - --hook-config=--add-to-existing-file=true
+          - --hook-config=--create-file-if-not-exist=false
+          - --args=--config=.config/.terraform-docs.yml
+          - --args=--lockfile=false
+        files: ^(?!examples/)
+
+      # terraform validate — syntax and consistency check.
+      # Runs terraform init -backend=false first (no remote state needed).
+      # Excluded: examples/ — relative module source path doesn't resolve
+      # without a full terraform init against the real module.
+      # Excluded: tests/ — .tftest.hcl files reference examples/ via relative
+      # paths that only work when run via terraform test, not terraform init.
+      - id: terraform_validate
+        args:
+          - --tf-init-args=-backend=false
+          - --hook-config=--retry-once-with-cleanup=true
+        files: ^(?!(examples|tests)/)
+
+      # tflint — naming conventions, missing descriptions, deprecated syntax.
+      # Config: .tflint.hcl
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+        files: .*\.tf$
+
+  # ---------------------------------------------------------------------------
+  # Terraform test — plan-only tests for all examples.
+  # Requires AWS credentials in the environment (plan calls AWS APIs).
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: terraform_test
+        name: terraform test (plan)
+        language: system
+        entry: terraform test
+        files: .*\.(tf|tftest\.hcl)$
+        pass_filenames: false
+        verbose: true

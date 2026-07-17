@@ -1,0 +1,62 @@
+version: 0.2
+
+# ---------------------------------------------------------------------------
+# Base Sync — Project 1
+#
+# Pulls SOURCE_IMAGE_URI and pushes to ECR as BASE_TAG.
+# No Dockerfile. Pure pull + tag + push.
+#
+# Idempotent: skips if BASE_TAG already exists in ECR (version-pinned tags).
+#
+# Environment variables (set by codebuild.tf):
+#   SOURCE_IMAGE_URI   — source image (nvcr.io/... or ECR URI)
+#   BASE_TAG           — destination ECR tag (e.g. llama-3-1-8b-instruct-1-8-3-base)
+#   ECR_REPO_URI       — destination ECR repo URI (without tag)
+#   NGC_API_KEY        — NGC auth token (injected only when source is nvcr.io)
+#   AWS_DEFAULT_REGION — region for ECR auth
+#   VERBOSE            — "true" enables set -x, timestamps, and elapsed-time logging
+# ---------------------------------------------------------------------------
+
+phases:
+  pre_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+        echo "=== [$(date -u '+%H:%M:%S')] Base Sync: authenticating with ECR ==="
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+      - |
+        if [ -n "${NGC_API_KEY:-}" ]; then
+          echo "NGC API key present — authenticating with nvcr.io"
+          echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
+        else
+          echo "No NGC API key — ECR/IAM auth only."
+        fi
+        echo "=== [$(date -u '+%H:%M:%S')] pre_build complete ($(($(date +%s) - PHASE_START))s) ==="
+
+  build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        set -eu
+        PHASE_START=$(date +%s)
+
+        if aws ecr describe-images \
+             --repository-name "$(basename "$ECR_REPO_URI")" \
+             --image-ids imageTag="$BASE_TAG" \
+             --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+          echo "=== [$(date -u '+%H:%M:%S')] $BASE_TAG already in ECR — skipping pull ==="
+        else
+          echo "=== [$(date -u '+%H:%M:%S')] Pulling $SOURCE_IMAGE_URI ==="
+          T=$(date +%s); docker pull "$SOURCE_IMAGE_URI"
+          echo "=== [$(date -u '+%H:%M:%S')] Pull complete ($(($(date +%s) - T))s) ==="
+
+          echo "=== [$(date -u '+%H:%M:%S')] Tagging as $ECR_REPO_URI:$BASE_TAG ==="
+          docker tag "$SOURCE_IMAGE_URI" "$ECR_REPO_URI:$BASE_TAG"
+
+          echo "=== [$(date -u '+%H:%M:%S')] Pushing $ECR_REPO_URI:$BASE_TAG ==="
+          T=$(date +%s); docker push "$ECR_REPO_URI:$BASE_TAG"
+          echo "=== [$(date -u '+%H:%M:%S')] Push complete ($(($(date +%s) - T))s) ==="
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] build complete ($(($(date +%s) - PHASE_START))s) ==="

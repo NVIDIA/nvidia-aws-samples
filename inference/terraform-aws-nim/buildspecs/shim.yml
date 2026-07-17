@@ -1,0 +1,151 @@
+version: 0.2
+
+# ---------------------------------------------------------------------------
+# Shim Build — Project 2
+#
+# Builds the SageMaker NIM shim image (Caddy reverse proxy + launch.sh) and
+# pushes to ECR:SHIM_TAG.
+# Source: shim-source.zip from S3 (uploaded by archives.tf). No git clone.
+#
+# pre_build polls BASE_SYNC_PROJECT until complete. Skipped when
+# BASE_SYNC_PROJECT is empty (sync_to_ecr = false — source is already in ECR).
+#
+# Environment variables (set by codebuild.tf):
+#   SOURCE_IMAGE_URI   — source image URI
+#   BASE_TAG           — ECR base tag (used when sync_to_ecr = true)
+#   SHIM_TAG           — ECR shim tag to produce
+#   SYNC_TO_ECR        — "true" or "false"
+#   BASE_SYNC_PROJECT  — base-sync CodeBuild project name to poll (empty when sync_to_ecr = false)
+#   ECR_REPO_URI       — ECR repo URI (without tag)
+#   AWS_DEFAULT_REGION — region for ECR auth
+#   NIM_CMD            — NIM start command (shim_config.nim_cmd / endpoint shim.nim_cmd)
+#   NIM_ENTRYPOINT     — NIM entrypoint path (shim_config.nim_entrypoint / endpoint shim.nim_entrypoint)
+#   CADDY_BACKEND_PORT — port Caddy routes to; empty = auto-detect from NIM_HTTP_API_PORT at startup
+#   CACHE_PATH         — container path for cached NIM artifacts
+#   CUDA_DRIVER_LABEL  — CUDA driver label for SageMaker AMI selection
+#   VERBOSE            — "true" enables set -x, timestamps, and elapsed-time logging
+#   FORCE_REBUILD      — "true" bypasses ECR idempotency check (shim_map force_rebuild)
+# ---------------------------------------------------------------------------
+
+phases:
+  pre_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+
+        if [ -z "${BASE_SYNC_PROJECT:-}" ]; then
+          echo "=== [$(date -u '+%H:%M:%S')] Shim Build: no base-sync required (sync_to_ecr = false) ==="
+        else
+          echo "=== [$(date -u '+%H:%M:%S')] Shim Build: waiting for base-sync ($BASE_SYNC_PROJECT) ==="
+          LATEST_ID=""
+          for i in $(seq 1 12); do
+            CANDIDATE=$(aws codebuild list-builds-for-project \
+              --project-name "$BASE_SYNC_PROJECT" \
+              --query 'ids[0]' --output text 2>/dev/null || echo "")
+            if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "None" ]; then
+              CANDIDATE_STATUS=$(aws codebuild batch-get-builds --ids "$CANDIDATE" \
+                --query 'builds[0].buildStatus' --output text 2>/dev/null || echo "")
+              if [ "$CANDIDATE_STATUS" = "IN_PROGRESS" ]; then
+                LATEST_ID="$CANDIDATE"
+                echo "Found in-progress base-sync build: $LATEST_ID"
+                break
+              fi
+            fi
+            echo "[$i/12] Waiting for in-progress base-sync build... (5 s)"
+            sleep 5
+          done
+          if [ -z "$LATEST_ID" ]; then
+            LATEST_ID=$(aws codebuild list-builds-for-project \
+              --project-name "$BASE_SYNC_PROJECT" \
+              --query 'ids[0]' --output text 2>/dev/null || echo "")
+            echo "No in-progress build found after 60 s — using latest: ${LATEST_ID:-none}"
+          fi
+          if [ -z "$LATEST_ID" ] || [ "$LATEST_ID" = "None" ]; then
+            echo "No builds found for $BASE_SYNC_PROJECT — assuming complete."
+          else
+            for i in $(seq 1 180); do
+              STATUS=$(aws codebuild batch-get-builds --ids "$LATEST_ID" \
+                --query 'builds[0].buildStatus' --output text 2>/dev/null || echo "UNKNOWN")
+              if [ "$STATUS" != "IN_PROGRESS" ]; then
+                echo "base-sync finished with status: $STATUS"
+                if [ "$STATUS" != "SUCCEEDED" ]; then
+                  echo "ERROR: base-sync did not succeed — aborting shim build."
+                  exit 1
+                fi
+                echo "base-sync complete — proceeding."
+                break
+              fi
+              echo "[$i/180] base-sync in progress — waiting 10 s..."
+              sleep 10
+            done
+          fi
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] Authenticating with ECR ==="
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+      - echo "=== [$(date -u '+%H:%M:%S')] pre_build complete ==="
+
+  build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+
+        if [ "$SYNC_TO_ECR" = "true" ]; then
+          SRC_IMAGE="$ECR_REPO_URI:$BASE_TAG"
+        else
+          SRC_IMAGE="$SOURCE_IMAGE_URI"
+        fi
+
+        # Skip if shim tag already exists in ECR (idempotent re-runs).
+        # Bypassed when FORCE_REBUILD=true so updated shim source actually deploys.
+        if [ "${FORCE_REBUILD:-false}" != "true" ] && aws ecr describe-images \
+             --repository-name "$(basename "$ECR_REPO_URI")" \
+             --image-ids imageTag="$SHIM_TAG" \
+             --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+          echo "=== [$(date -u '+%H:%M:%S')] $SHIM_TAG already in ECR — skipping build ==="
+          exit 0
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] Building shim FROM $SRC_IMAGE → $ECR_REPO_URI:$SHIM_TAG ==="
+        T=$(date +%s)
+        docker build \
+          --platform linux/amd64 \
+          --provenance=false \
+          --build-arg SRC_IMAGE="$SRC_IMAGE" \
+          --build-arg NIM_CMD="$NIM_CMD" \
+          --build-arg NIM_ENTRYPOINT="$NIM_ENTRYPOINT" \
+          --build-arg CADDY_BACKEND_PORT="$CADDY_BACKEND_PORT" \
+          --build-arg CACHE_PATH="$CACHE_PATH" \
+          --build-arg CUDA_DRIVER_LABEL="$CUDA_DRIVER_LABEL" \
+          -t "$ECR_REPO_URI:$SHIM_TAG" \
+          .
+        echo "=== [$(date -u '+%H:%M:%S')] Build complete ($(($(date +%s) - T))s) ==="
+
+        echo "=== [$(date -u '+%H:%M:%S')] Pushing $ECR_REPO_URI:$SHIM_TAG ==="
+        T=$(date +%s); docker push "$ECR_REPO_URI:$SHIM_TAG"
+        echo "=== [$(date -u '+%H:%M:%S')] Push complete ($(($(date +%s) - T))s) ==="
+
+        echo "=== [$(date -u '+%H:%M:%S')] build complete ($(($(date +%s) - PHASE_START))s) ==="
+
+  post_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        echo "=== [$(date -u '+%H:%M:%S')] Confirming $SHIM_TAG visible in ECR ==="
+        for i in $(seq 1 30); do
+          if aws ecr describe-images \
+               --repository-name "$(basename "$ECR_REPO_URI")" \
+               --image-ids imageTag="$SHIM_TAG" \
+               --region "$AWS_DEFAULT_REGION" \
+               > /dev/null 2>&1; then
+            echo "Tag $SHIM_TAG confirmed in ECR."
+            break
+          fi
+          if [ "$i" -eq 30 ]; then
+            echo "ERROR: $SHIM_TAG not visible in ECR after 60 s."
+            exit 1
+          fi
+          sleep 2
+        done

@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars and edit the value below.
+#
+# Name of the Secrets Manager secret holding your NGC API key (plaintext).
+# The NGC account must be approved for the "AI for Media Private Access
+# Program" — image pull will fail without that entitlement.
+ngc_secret_name = "your-ngc-secret-name"

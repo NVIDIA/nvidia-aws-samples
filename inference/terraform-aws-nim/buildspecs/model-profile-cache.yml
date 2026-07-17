@@ -1,0 +1,296 @@
+version: 0.2
+
+# ---------------------------------------------------------------------------
+# Model Profile Cache — Project 3
+#
+# Downloads the best-matching NGC model profile to S3 so SageMaker endpoints
+# sync from S3 at startup (~2-5 min) instead of downloading from NGC (~5-10 min).
+#
+# No GPU required. The NIM server never starts; download-to-cache runs in
+# utility mode. No fleet — standard CPU compute only.
+#
+# Idempotent: skips if S3 cache prefix already has objects.
+#
+# pre_build polls BASE_SYNC_PROJECT until complete. Skipped when
+# BASE_SYNC_PROJECT is empty (sync_to_ecr = false).
+#
+# Profile auto-selection (when MODEL_PROFILE is empty):
+#   list-model-profiles output has two tiers:
+#     - Short generic names (sglang, vllm, tensorrt_llm) — metadata only, skip
+#     - Full names with tp info — these are the real downloadable profiles
+#
+#   download-to-cache accepts human-readable names in older NIMs and SHA hashes
+#   in newer NIMs (e.g. nemotron-3-nano 2.0.2+). Selection uses the name; the
+#   SHA hash is looked up from PROFILE_PAIRS and passed to download-to-cache.
+#
+#   Selection priority (highest first):
+#     1. TRT profile matching GPU name + tp{GPU_COUNT} + bf16 + throughput
+#     2. TRT profile matching GPU name + tp{GPU_COUNT} + bf16 (any mode)
+#     3. TRT profile matching GPU name + tp{GPU_COUNT} (any precision)
+#     4. vLLM profile matching tp{GPU_COUNT} + bf16 (architecture-agnostic)
+#     5. vLLM profile matching tp{GPU_COUNT} (any precision)
+#     6. tp1 + bf16 fallback
+#     7. tp1 fallback
+#     8. Fail loudly with full profile list if nothing matched
+#
+# Environment variables (set by codebuild.tf):
+#   SOURCE_IMAGE_URI   — source image URI
+#   BASE_TAG           — ECR base tag (used when sync_to_ecr = true)
+#   INSTANCE_TYPE      — EC2 instance type without ml. prefix (e.g. g6e.12xlarge)
+#   MODEL_PROFILE      — profile prefix override (empty = auto-select)
+#   CACHE_PREFIX       — S3 prefix for this endpoint's cache (nim-cache/{canonical}/{instance})
+#   SYNC_TO_ECR        — "true" or "false"
+#   BASE_SYNC_PROJECT  — base-sync CodeBuild project name to poll (empty when sync_to_ecr = false)
+#   ECR_REPO_URI       — ECR repo URI (without tag)
+#   S3_BUCKET          — S3 bucket for model profile cache
+#   CACHE_PATH         — container path where NIM reads cached artifacts
+#   NGC_API_KEY        — required by list-model-profiles + download-to-cache
+#   AWS_DEFAULT_REGION — region
+#   VERBOSE            — "true" enables set -x, timestamps, and elapsed-time logging
+# ---------------------------------------------------------------------------
+
+phases:
+  pre_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+        if [ -z "${BASE_SYNC_PROJECT:-}" ]; then
+          echo "=== [$(date -u '+%H:%M:%S')] Model Profile Cache: no base-sync required (sync_to_ecr = false) ==="
+        else
+          echo "=== [$(date -u '+%H:%M:%S')] Waiting for base-sync ($BASE_SYNC_PROJECT) ==="
+          LATEST_ID=""
+          for i in $(seq 1 12); do
+            CANDIDATE=$(aws codebuild list-builds-for-project \
+              --project-name "$BASE_SYNC_PROJECT" \
+              --query 'ids[0]' --output text 2>/dev/null || echo "")
+            if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "None" ]; then
+              CANDIDATE_STATUS=$(aws codebuild batch-get-builds --ids "$CANDIDATE" \
+                --query 'builds[0].buildStatus' --output text 2>/dev/null || echo "")
+              if [ "$CANDIDATE_STATUS" = "IN_PROGRESS" ]; then
+                LATEST_ID="$CANDIDATE"
+                echo "Found in-progress base-sync build: $LATEST_ID"
+                break
+              fi
+            fi
+            echo "[$i/12] Waiting for in-progress base-sync build... (5 s)"
+            sleep 5
+          done
+          if [ -z "$LATEST_ID" ]; then
+            LATEST_ID=$(aws codebuild list-builds-for-project \
+              --project-name "$BASE_SYNC_PROJECT" \
+              --query 'ids[0]' --output text 2>/dev/null || echo "")
+            echo "No in-progress build found after 60 s — using latest: ${LATEST_ID:-none}"
+          fi
+          if [ -z "$LATEST_ID" ] || [ "$LATEST_ID" = "None" ]; then
+            echo "No builds found for $BASE_SYNC_PROJECT — assuming complete."
+          else
+            for i in $(seq 1 180); do
+              STATUS=$(aws codebuild batch-get-builds --ids "$LATEST_ID" \
+                --query 'builds[0].buildStatus' --output text 2>/dev/null || echo "UNKNOWN")
+              if [ "$STATUS" != "IN_PROGRESS" ]; then
+                echo "base-sync finished with status: $STATUS"
+                if [ "$STATUS" != "SUCCEEDED" ]; then
+                  echo "ERROR: base-sync did not succeed — aborting model-profile-cache build."
+                  exit 1
+                fi
+                echo "base-sync complete — proceeding."
+                break
+              fi
+              echo "[$i/180] base-sync in progress — waiting 10 s..."
+              sleep 10
+            done
+          fi
+        fi
+
+      - echo "=== [$(date -u '+%H:%M:%S')] Authenticating with ECR ==="
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+      - echo "=== [$(date -u '+%H:%M:%S')] pre_build complete ($(($(date +%s) - PHASE_START))s) ==="
+
+  build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+        if [ "$SYNC_TO_ECR" = "true" ]; then
+          NIM_IMAGE="$ECR_REPO_URI:$BASE_TAG"
+        else
+          NIM_IMAGE="$SOURCE_IMAGE_URI"
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] instance=$INSTANCE_TYPE image=$NIM_IMAGE cache=s3://$S3_BUCKET/$CACHE_PREFIX/ ==="
+
+        # Skip if cache already complete (PROFILE_COMPLETE marker written at end of last run).
+        # Checking for actual files with grep -q would treat a partial upload as warm — the
+        # marker is only written after a successful sync, so its presence is authoritative.
+        if aws s3 ls "s3://$S3_BUCKET/$CACHE_PREFIX/PROFILE_COMPLETE" > /dev/null 2>&1; then
+          echo "=== Profile cache already complete — skipping ==="
+          exit 0
+        fi
+
+        # Run list-model-profiles
+        echo "=== [$(date -u '+%H:%M:%S')] Running list-model-profiles on $NIM_IMAGE ==="
+        T=$(date +%s)
+        RAW_PROFILES=$(docker run --rm \
+          -e NGC_API_KEY="${NGC_API_KEY:-}" \
+          "$NIM_IMAGE" \
+          list-model-profiles 2>&1)
+
+        echo "=== [$(date -u '+%H:%M:%S')] list-model-profiles complete ($(($(date +%s) - T))s) ==="
+        if [ "${VERBOSE:-false}" = "true" ]; then
+          echo "=== Raw list-model-profiles output ==="
+          echo "$RAW_PROFILES"
+          echo "---"
+        fi
+
+        # Parse "HASH NAME" pairs from both output formats.
+        # download-to-cache requires the SHA hash in newer NIM versions, not the name.
+        #   Old: "<hash>: <name>"
+        #   New: "    - <hash> (<name>) [requires ...]"
+        PROFILE_PAIRS=$(echo "$RAW_PROFILES" | sed -E -n \
+          -e 's/.*- ([a-f0-9]{40,}) \(([^)]+)\).*/\1 \2/p' \
+          -e 's/^([a-f0-9]{40,}): ([^ ]+).*/\1 \2/p')
+
+        ALL_PROFILES=$(echo "$PROFILE_PAIRS" | awk '{print $2}' | \
+          grep -E '(tensorrt_llm|vllm|sglang).*tp[0-9]' | sort -u)
+
+        if [ "${VERBOSE:-false}" = "true" ]; then
+          echo "=== PROFILE_PAIRS (hash name) ==="
+          echo "$PROFILE_PAIRS"
+          echo "=== Filtered profile names ==="
+          echo "$ALL_PROFILES"
+          echo "---"
+        fi
+
+        LOCAL_CACHE="/tmp/nim-cache"
+        mkdir -p "$LOCAL_CACHE"
+        chmod 777 "$LOCAL_CACHE"
+
+        SELECTED_PROFILE=""
+
+        if [ -n "${MODEL_PROFILE:-}" ]; then
+          echo "=== Resolving prefix: $MODEL_PROFILE ==="
+          SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "^${MODEL_PROFILE}" | head -1 || true)
+          if [ -z "$SELECTED_PROFILE" ]; then
+            echo "ERROR: No profile matched prefix '${MODEL_PROFILE}'."
+            echo "Available profiles:"
+            echo "$ALL_PROFILES"
+            exit 1
+          fi
+          echo "=== Resolved: $SELECTED_PROFILE ==="
+        else
+          echo "=== Auto-selecting profile for $INSTANCE_TYPE ==="
+
+          GPU_COUNT=1
+          case "$INSTANCE_TYPE" in
+            g5.48xlarge|g6.48xlarge|g6e.48xlarge|p3.16xlarge|p4d.24xlarge|p4de.24xlarge|p5.48xlarge|p5e.48xlarge)
+              GPU_COUNT=8 ;;
+            g4dn.12xlarge|g5.12xlarge|g5.24xlarge|g6.12xlarge|g6.24xlarge|g6e.12xlarge|g6e.24xlarge|p3.8xlarge)
+              GPU_COUNT=4 ;;
+            g4dn.8xlarge)
+              GPU_COUNT=2 ;;
+            *)
+              GPU_COUNT=1 ;;
+          esac
+
+          GPU_NAME=""
+          case "$INSTANCE_TYPE" in
+            g5.*)   GPU_NAME="a10g" ;;
+            g6e.*)  GPU_NAME="l40s" ;;
+            g6.*)   GPU_NAME="l4" ;;
+            g4dn.*) GPU_NAME="t4" ;;
+            p4d.*)  GPU_NAME="a100_sxm4_40gb" ;;
+            p4de.*) GPU_NAME="a100" ;;
+            p5.*)   GPU_NAME="h100" ;;
+            p5e.*)  GPU_NAME="h100" ;;
+          esac
+
+          echo "  GPU count: $GPU_COUNT  GPU name: ${GPU_NAME:-unknown}"
+
+          if [ -n "$GPU_NAME" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "tensorrt_llm-${GPU_NAME}-" | grep "tp${GPU_COUNT}" | grep "bf16" | grep "throughput" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ] && [ -n "$GPU_NAME" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "tensorrt_llm-${GPU_NAME}-" | grep "tp${GPU_COUNT}" | grep "bf16" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ] && [ -n "$GPU_NAME" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "tensorrt_llm-${GPU_NAME}-" | grep "tp${GPU_COUNT}" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "^vllm-" | grep "tp${GPU_COUNT}" | grep "bf16" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "^vllm-" | grep "tp${GPU_COUNT}" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "tp1" | grep "bf16" | grep -v "lora" | head -1 || true)
+          fi
+          if [ -z "$SELECTED_PROFILE" ]; then
+            SELECTED_PROFILE=$(echo "$ALL_PROFILES" | grep "tp1" | grep -v "lora" | head -1 || true)
+          fi
+
+          if [ -z "$SELECTED_PROFILE" ]; then
+            echo "ERROR: No suitable profile found for $INSTANCE_TYPE."
+            echo "Set model_profile in sagemaker_endpoints to override auto-selection."
+            exit 1
+          fi
+
+          echo "=== Selected: $SELECTED_PROFILE ==="
+        fi
+
+        # Newer NIM versions require the SHA hash; older ones accept the name.
+        # Look up the hash for the selected profile name; fall back to the name if not found.
+        SELECTED_HASH=$(echo "$PROFILE_PAIRS" | awk -v n="$SELECTED_PROFILE" '$2==n{print $1;exit}')
+        if [ -z "$SELECTED_HASH" ]; then
+          echo "WARN: no hash found for '$SELECTED_PROFILE' — unknown list-model-profiles format? Passing name directly."
+          SELECTED_HASH="$SELECTED_PROFILE"
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] Downloading: $SELECTED_PROFILE ($SELECTED_HASH) ==="
+        T=$(date +%s)
+        if ! docker run --rm \
+          -e NGC_API_KEY="${NGC_API_KEY:-}" \
+          -e NIM_CACHE_PATH="${CACHE_PATH:-/opt/nim/.cache}" \
+          -v "$LOCAL_CACHE:${CACHE_PATH:-/opt/nim/.cache}" \
+          "$NIM_IMAGE" \
+          download-to-cache -p "$SELECTED_HASH"; then
+          echo "ERROR: download-to-cache failed — aborting."
+          exit 1
+        fi
+        echo "=== [$(date -u '+%H:%M:%S')] Download complete ($(($(date +%s) - T))s) ==="
+
+        # download-to-cache exits 0 even when it silently skips ("profile doesn't exist").
+        # It also creates empty directories in the cache path, so check for actual files.
+        if [ -z "$(find "$LOCAL_CACHE" -type f 2>/dev/null)" ]; then
+          echo "ERROR: download-to-cache wrote no model files (empty dirs don't count)."
+          echo "  Profile: $SELECTED_PROFILE"
+          echo "  Hash:    $SELECTED_HASH"
+          echo "  Likely cause: truncated/invalid hash or invalid NGC_API_KEY."
+          echo "=== Raw list-model-profiles output ==="
+          echo "$RAW_PROFILES"
+          exit 1
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] Uploading to s3://$S3_BUCKET/$CACHE_PREFIX/ ==="
+        T=$(date +%s)
+        aws s3 sync "$LOCAL_CACHE/" "s3://$S3_BUCKET/$CACHE_PREFIX/" --no-progress
+        echo "=== [$(date -u '+%H:%M:%S')] Upload complete ($(($(date +%s) - T))s) ==="
+        echo -n | aws s3 cp - "s3://$S3_BUCKET/$CACHE_PREFIX/PROFILE_COMPLETE"
+        echo "=== [$(date -u '+%H:%M:%S')] build complete ($(($(date +%s) - PHASE_START))s) ==="
+
+  post_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        echo "=== Cache Summary: s3://$S3_BUCKET/$CACHE_PREFIX/ ==="
+        SIZE_BYTES=$(aws s3 ls "s3://$S3_BUCKET/$CACHE_PREFIX/" --recursive 2>/dev/null \
+          | grep -v 'PROFILE_COMPLETE' | awk '{sum += $3} END {print sum+0}')
+        if [ "${SIZE_BYTES:-0}" -gt 0 ] 2>/dev/null; then
+          SIZE_GB=$(awk "BEGIN { printf \"%.1f\", $SIZE_BYTES / 1073741824 }")
+          echo "  Profile:  $SELECTED_PROFILE"
+          echo "  Size:     ${SIZE_GB} GB"
+          echo "  Startup:  ~2-5 min (S3 sync) vs ~10-15 min (NGC download)"
+        else
+          echo "  (cache prefix empty — skipped or upload failed)"
+        fi
+        aws s3 ls "s3://$S3_BUCKET/$CACHE_PREFIX/" --recursive --human-readable 2>/dev/null | head -5 || true

@@ -1,0 +1,156 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - '[ "$VERBOSE" = "true" ] && set -x || true'
+      - |
+        curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        mv kubectl /usr/local/bin/
+      # helm is only needed when ENABLE_AUTOSCALING=true (KEDA/Prometheus/DCGM installs).
+      # Installed unconditionally — the download is small and it simplifies the buildspec.
+      - 'curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
+      - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+      - kubectl cluster-info --request-timeout 30s
+
+  build:
+    commands:
+      # Apply GPU NodePool — constrains Auto Mode to provision GPU instance types for NIM pods.
+      # nodeClassRef references the EKS-managed NodeClass (eks.amazonaws.com/v1), not
+      # karpenter.k8s.aws/EC2NodeClass which is only used in self-managed Karpenter installs.
+      - |
+        cat > /tmp/gpu-nodepool.yaml <<EOF
+        apiVersion: karpenter.sh/v1
+        kind: NodePool
+        metadata:
+          name: ${NAME_PREFIX}-gpu
+        spec:
+          template:
+            spec:
+              nodeClassRef:
+                group: eks.amazonaws.com
+                kind: NodeClass
+                name: default
+              requirements:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values: ["${GPU_INSTANCE_TYPE}"]
+                - key: kubernetes.io/arch
+                  operator: In
+                  values: ["amd64"]
+                - key: karpenter.sh/capacity-type
+                  operator: In
+                  values: ["on-demand"]
+          limits:
+            nvidia.com/gpu: "100"
+          disruption:
+            consolidationPolicy: WhenEmptyOrUnderutilized
+            consolidateAfter: 1m
+        EOF
+      - kubectl apply -f /tmp/gpu-nodepool.yaml
+
+      # ---------------------------------------------------------------------
+      # Autoscaling stack: KEDA + kube-prometheus-stack + DCGM exporter.
+      #
+      # Installed cluster-wide when ENABLE_AUTOSCALING=true. Provides the
+      # metric source (DCGM → Prometheus) and scaler (KEDA fronts native HPA)
+      # required for any deployment on this cluster to opt into ScaledObject-
+      # based autoscaling via eks_deployments[*].autoscaling.
+      #
+      # Chart versions are pinned here for reproducible builds — review
+      # periodically as upstream releases progress. Grafana + Alertmanager are
+      # disabled to keep the install lightweight; enable via a follow-up
+      # helm upgrade if you want dashboards.
+      # ---------------------------------------------------------------------
+      - |
+        if [ "${ENABLE_AUTOSCALING}" = "true" ]; then
+          echo "Installing autoscaling stack (KEDA + kube-prometheus-stack + DCGM exporter)..."
+
+          # KEDA — CNCF-graduated event-driven autoscaler. Fronts native HPA and
+          # adds Prometheus, SQS, CloudWatch, and 60+ other trigger types.
+          # Version pinned from https://kedacore.github.io/charts/ — bump periodically.
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm repo update kedacore
+          helm upgrade --install keda \
+            kedacore/keda \
+            --version 2.20.1 \
+            --namespace keda --create-namespace \
+            --wait --timeout 10m
+
+          # kube-prometheus-stack — Prometheus operator + Prometheus + service-
+          # monitor auto-discovery. Grafana + Alertmanager disabled for a
+          # minimal footprint (dashboards can be added via a follow-up install).
+          # Version pinned from https://prometheus-community.github.io/helm-charts/ — bump periodically.
+          #
+          # serviceMonitorSelectorNilUsesHelmValues=false widens SM discovery
+          # to any label. Chart default (true) auto-injects a matchLabel of
+          # `release: kps`, restricting to SMs with that exact label — safe
+          # for the kps chart's own SMs but breaks discovery of ours because
+          # NIM chart's SM carries the release label of the NIM's helm chart,
+          # not the kps release name.
+          #
+          # Namespace discovery: intentionally NOT --set here. The chart's
+          # else-branch already renders `serviceMonitorNamespaceSelector: {}`
+          # when unset, which matches all namespaces per standard LabelSelector
+          # semantics. (An earlier iteration used --set ...any=true — that's
+          # syntactically wrong: any is a NamespaceSelector field, not a
+          # LabelSelector field. Two different types with same-ish names in
+          # the prometheus-operator API. Dropped.)
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update prometheus-community
+          helm upgrade --install kps \
+            prometheus-community/kube-prometheus-stack \
+            --version 87.16.1 \
+            --namespace monitoring --create-namespace \
+            --set grafana.enabled=false \
+            --set alertmanager.enabled=false \
+            --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+            --wait --timeout 15m
+
+          # DCGM exporter — NVIDIA-published Prometheus exporter for GPU
+          # metrics (DCGM_FI_DEV_GPU_UTIL, DCGM_FI_DEV_MEM_USED, etc.). Runs
+          # as a DaemonSet on GPU nodes. Consumed by KEDA ScaledObjects that
+          # scale on GPU utilization.
+          # Version pinned from https://nvidia.github.io/dcgm-exporter/helm-charts/ — bump periodically.
+          #
+          # kubernetes.enablePodLabels=true:
+          #   By default DCGM emits metrics labeled only with node/GPU
+          #   identifiers (Hostname, gpu, UUID). With this flag it also
+          #   stamps `pod` and `namespace` labels sourced from the kubelet
+          #   PodResources socket — required for KEDA queries like
+          #   avg(DCGM_FI_DEV_GPU_UTIL{pod=~"<deployment>-.*"}) to actually
+          #   filter to a specific NIM's pods.
+          # serviceMonitor.additionalLabels.release=kps:
+          #   The chart auto-installs a ServiceMonitor but doesn't stamp the
+          #   release label kube-prometheus-stack expects. Without this,
+          #   Prometheus never scrapes DCGM.
+          # serviceMonitor.honorLabels=true:
+          #   With honorLabels=false (chart default), Prometheus's scrape
+          #   config auto-injects `namespace` and `pod` labels referring to
+          #   the DCGM EXPORTER's own pod (in monitoring namespace), and
+          #   renames DCGM's target-emitted `namespace`/`pod` labels (which
+          #   refer to the WORKLOAD pod being observed) to `exported_*`.
+          #   That breaks our ScaledObject query which filters by
+          #   `namespace` and `pod` expecting workload semantics. Setting
+          #   honorLabels=true makes DCGM's target labels canonical —
+          #   `namespace` and `pod` refer to the workload, matching what
+          #   the deploy-nim buildspec's PromQL query expects.
+          helm repo add gpu-helm-charts https://nvidia.github.io/dcgm-exporter/helm-charts
+          helm repo update gpu-helm-charts
+          helm upgrade --install dcgm-exporter \
+            gpu-helm-charts/dcgm-exporter \
+            --version 4.8.3 \
+            --namespace monitoring \
+            --set kubernetes.enablePodLabels=true \
+            --set serviceMonitor.additionalLabels.release=kps \
+            --set serviceMonitor.honorLabels=true \
+            --wait --timeout 10m
+
+          echo "Autoscaling stack installed."
+        else
+          echo "ENABLE_AUTOSCALING=false — skipping autoscaling stack install."
+        fi
+
+      - echo "Cluster setup complete. NodePool ${NAME_PREFIX}-gpu ready."
+      - kubectl get nodepool "${NAME_PREFIX}-gpu"
