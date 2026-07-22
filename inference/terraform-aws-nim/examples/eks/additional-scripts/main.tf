@@ -6,7 +6,8 @@ module "terraform-aws-nim" {
   region         = var.region != null ? var.region : data.aws_region.current.region
 
   ngc_credentials = {
-    secret_arn = data.aws_secretsmanager_secret.ngc.arn
+    secret_arn      = data.aws_secretsmanager_secret.ngc.arn
+    secret_json_key = "access-key"
   }
 
   eks_clusters = {
@@ -34,6 +35,10 @@ module "terraform-aws-nim" {
         cluster_key        = "llama-nemotron-nano-8b"
         source_image_uri   = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
         helm_chart_version = "2.0.3"
+
+        # Restrict the internet-facing NLB to the deployer's IP (module validation
+        # requires this when load_balancer_internal = false).
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
 
         # Scripts run in order as init containers before the NIM pod starts.
         # Local files are uploaded to S3 automatically — no manual zip or upload needed.

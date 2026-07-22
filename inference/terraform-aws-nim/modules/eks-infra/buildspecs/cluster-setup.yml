@@ -4,13 +4,24 @@ phases:
   install:
     commands:
       - '[ "$VERBOSE" = "true" ] && set -x || true'
+      # kubectl — pinned version + SHA256 verification. Bump both to upgrade.
       - |
-        curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        mv kubectl /usr/local/bin/
-      # helm is only needed when ENABLE_AUTOSCALING=true (KEDA/Prometheus/DCGM installs).
-      # Installed unconditionally — the download is small and it simplifies the buildspec.
-      - 'curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
+        KUBECTL_VERSION=v1.31.0
+        KUBECTL_SHA256=7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437
+        curl -sLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -
+        chmod +x kubectl && mv kubectl /usr/local/bin/
+      # Helm — pinned version + SHA256 verification. Only needed when
+      # ENABLE_AUTOSCALING=true, but installed unconditionally to keep the
+      # buildspec simple (~15 MB download).
+      - |
+        HELM_VERSION=v3.16.4
+        HELM_SHA256=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+        curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o helm.tar.gz
+        echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+        tar -xzf helm.tar.gz
+        mv linux-amd64/helm /usr/local/bin/
+        rm -rf helm.tar.gz linux-amd64
       - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
       - kubectl cluster-info --request-timeout 30s
 

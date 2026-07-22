@@ -215,6 +215,12 @@ resource "aws_codebuild_project" "nim_deploy" {
       name  = "LOAD_BALANCER_INTERNAL"
       value = tostring(var.load_balancer_internal)
     }
+    # Comma-separated for the buildspec to split. Empty string when null so the
+    # buildspec's `[ -z ... ]` check skips emitting loadBalancerSourceRanges.
+    environment_variable {
+      name  = "NLB_ALLOWED_CIDR_BLOCKS"
+      value = var.nlb_allowed_cidr_blocks != null ? join(",", var.nlb_allowed_cidr_blocks) : ""
+    }
     environment_variable {
       name  = "VERBOSE"
       value = tostring(var.debug)
@@ -250,11 +256,11 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = var.autoscaling != null ? tostring(var.autoscaling.scale_down_delay) : ""
     }
     dynamic "environment_variable" {
-      for_each = var.ngc_api_key != null ? [1] : []
+      for_each = var.ngc_cb_env_value != null ? [1] : []
       content {
         name  = "NGC_API_KEY"
-        value = var.ngc_api_key
-        type  = "PLAINTEXT"
+        value = var.ngc_cb_env_value
+        type  = var.ngc_cb_env_type
       }
     }
   }
@@ -307,6 +313,8 @@ resource "terraform_data" "deploy_trigger" {
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas
+      load_balancer_internal     = var.load_balancer_internal
+      nlb_allowed_cidr_blocks    = var.nlb_allowed_cidr_blocks != null ? join(",", var.nlb_allowed_cidr_blocks) : ""
       autoscaling_enabled        = var.autoscaling != null
       autoscaling_min_replicas   = var.autoscaling != null ? var.autoscaling.min_replicas : 0
       autoscaling_max_replicas   = var.autoscaling != null ? var.autoscaling.max_replicas : 0

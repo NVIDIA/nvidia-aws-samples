@@ -81,6 +81,18 @@ data "aws_iam_policy_document" "codebuild_deploy_policy" {
     actions   = ["s3:GetObject"]
     resources = ["arn:aws:s3:::${var.buildspec_s3_bucket}/${var.buildspec_s3_key}"]
   }
+
+  # Secrets Manager fetch — required at build start when the NGC_API_KEY env var
+  # uses SECRETS_MANAGER type (var.ngc_cb_env_type = "SECRETS_MANAGER"). Scoped
+  # to only the specific ARN the customer supplied via ngc_credentials.secret_arn.
+  dynamic "statement" {
+    for_each = var.ngc_secret_arn != null ? [1] : []
+    content {
+      sid       = "SecretsManagerReadNGC"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = [var.ngc_secret_arn]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "codebuild_deploy" {

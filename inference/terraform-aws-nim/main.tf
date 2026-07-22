@@ -446,6 +446,9 @@ module "eks_app_nim" {
   weights_s3_prefix          = null
   extra_args_str             = null
   ngc_api_key                = local.ngc_api_key
+  ngc_cb_env_value           = local.ngc_cb_env_value
+  ngc_cb_env_type            = local.ngc_cb_env_type
+  ngc_secret_arn             = try(var.ngc_credentials.secret_arn, null)
   enable_model_profile_cache = each.value.enable_model_profile_cache
   cache_bucket               = try(aws_s3_bucket.nim_cache[0].bucket, null)
   cache_prefix               = local.eks_cache_prefix[each.key]
@@ -460,6 +463,7 @@ module "eks_app_nim" {
   namespace                  = coalesce(each.value.namespace, each.key)
   node_pool_name             = "${local.name_prefix}-${each.value.cluster_key}-gpu"
   load_balancer_internal     = each.value.load_balancer_internal
+  nlb_allowed_cidr_blocks    = each.value.nlb_allowed_cidr_blocks
   debug                      = var.debug || each.value.debug
   force_rebuild              = var.force_rebuild || each.value.force_rebuild
   additional_scripts         = local.additional_scripts_uris_eks_nim[each.key]
@@ -503,6 +507,9 @@ module "eks_app_open_weight" {
   weights_s3_prefix          = local.eks_open_weight_s3_prefix[each.key]
   extra_args_str             = local.eks_extra_args_str[each.key]
   ngc_api_key                = local.ngc_api_key
+  ngc_cb_env_value           = local.ngc_cb_env_value
+  ngc_cb_env_type            = local.ngc_cb_env_type
+  ngc_secret_arn             = try(var.ngc_credentials.secret_arn, null)
   enable_model_profile_cache = false
   cache_bucket               = null
   cache_prefix               = null
@@ -517,6 +524,7 @@ module "eks_app_open_weight" {
   namespace                  = coalesce(each.value.namespace, each.key)
   node_pool_name             = "${local.name_prefix}-${each.value.cluster_key}-gpu"
   load_balancer_internal     = each.value.load_balancer_internal
+  nlb_allowed_cidr_blocks    = each.value.nlb_allowed_cidr_blocks
   debug                      = var.debug || each.value.debug
   force_rebuild              = var.force_rebuild || each.value.force_rebuild
   additional_scripts         = local.additional_scripts_uris_eks_ow[each.key]

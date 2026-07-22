@@ -55,8 +55,9 @@ variable "log_retention_days" {
 
 variable "ngc_credentials" {
   type = object({
-    api_key    = optional(string, null)
-    secret_arn = optional(string, null)
+    api_key         = optional(string, null)
+    secret_arn      = optional(string, null)
+    secret_json_key = optional(string, null)
   })
   sensitive   = true
   default     = null
@@ -67,18 +68,25 @@ variable "ngc_credentials" {
     Provide exactly one of:
       api_key    — raw NGC API key string. Stored in Terraform state — only use for
                    development. Use secret_arn for production.
-      secret_arn — ARN of an existing AWS Secrets Manager secret. Two formats work:
+      secret_arn — ARN of an existing AWS Secrets Manager secret. When set, the module
+                   references the secret directly in CodeBuild environment variables via
+                   the SECRETS_MANAGER env-var type — the raw value never enters
+                   Terraform state or CodeBuild project config. CodeBuild fetches the
+                   value at build start via IAM (secretsmanager:GetSecretValue on the
+                   specific ARN). Two secret formats supported:
 
-                   Option A — Plaintext secret (recommended):
-                     In the Secrets Manager console, choose "Plaintext" and paste
-                     the raw NGC API key. The module uses the value directly.
+                   Option A — Plaintext secret (recommended, default):
+                     In the Secrets Manager console, choose "Plaintext" and paste the
+                     raw NGC API key. Leave secret_json_key = null.
 
                    Option B — Key/value secret:
-                     In the Secrets Manager console, choose "Key/value" and add a
-                     single entry with any key name and the NGC API key as the value.
-                     The module auto-extracts the only value. If the secret contains
-                     more than one key/value pair this will not work — use Plaintext
-                     or a dedicated single-value secret instead.
+                     In the Secrets Manager console, choose "Key/value" and add an
+                     entry with a specific key name. Set secret_json_key to that key
+                     name (e.g. "access-key" or "ngc_api_key"). The module references
+                     "<arn>:<secret_json_key>::" so CodeBuild extracts the right value.
+
+    secret_json_key — Optional JSON key name for Option B key/value secrets. Ignored when
+                      api_key is set or when the secret is plaintext.
 
     Providing both api_key and secret_arn is a validation error. Null is acceptable
     when all endpoints use ECR source images and license validation is not required.
@@ -94,8 +102,9 @@ variable "ngc_credentials" {
 
 variable "hf_credentials" {
   type = object({
-    token      = optional(string, null)
-    secret_arn = optional(string, null)
+    token           = optional(string, null)
+    secret_arn      = optional(string, null)
+    secret_json_key = optional(string, null)
   })
   sensitive   = true
   default     = null
@@ -538,6 +547,7 @@ variable "eks_deployments" {
       replicas                   = optional(number, 1)
       namespace                  = optional(string, null)
       load_balancer_internal     = optional(bool, false)
+      nlb_allowed_cidr_blocks    = optional(list(string), null)
       debug                      = optional(bool, false)
       force_rebuild              = optional(bool, false)
       additional_scripts         = optional(list(object({ source = string })), [])
@@ -552,18 +562,19 @@ variable "eks_deployments" {
       }), null)
     })), {})
     open_weight = optional(map(object({
-      cluster_key            = string
-      model_id               = string
-      model_source           = string
-      model_revision         = optional(string, "main")
-      extra_args             = optional(map(string), {})
-      gpu_count              = optional(number, null)
-      replicas               = optional(number, 1)
-      namespace              = optional(string, null)
-      load_balancer_internal = optional(bool, false)
-      debug                  = optional(bool, false)
-      force_rebuild          = optional(bool, false)
-      additional_scripts     = optional(list(object({ source = string })), [])
+      cluster_key             = string
+      model_id                = string
+      model_source            = string
+      model_revision          = optional(string, "main")
+      extra_args              = optional(map(string), {})
+      gpu_count               = optional(number, null)
+      replicas                = optional(number, 1)
+      namespace               = optional(string, null)
+      load_balancer_internal  = optional(bool, false)
+      nlb_allowed_cidr_blocks = optional(list(string), null)
+      debug                   = optional(bool, false)
+      force_rebuild           = optional(bool, false)
+      additional_scripts      = optional(list(object({ source = string })), [])
       autoscaling = optional(object({
         min_replicas     = optional(number, 1)
         max_replicas     = optional(number, 5)
@@ -787,6 +798,25 @@ variable "eks_deployments" {
       v.port == null || (v.port >= 1 && v.port <= 65535)
     ])
     error_message = "eks_deployments.nim: port must be null (use default) or a valid TCP port (1-65535)."
+  }
+
+  # Force an explicit network-access posture on internet-facing NIM NLBs. The k8s Service
+  # loadBalancerSourceRanges field wires directly into the NLB security group; leaving it
+  # unset means the NLB accepts inference requests from 0.0.0.0/0. Refusing that combo at
+  # plan-time is defense-in-depth against forgetting the CIDR in an example.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      v.load_balancer_internal == true || (v.nlb_allowed_cidr_blocks != null && length(v.nlb_allowed_cidr_blocks) > 0)
+    ])
+    error_message = "eks_deployments.nim: when load_balancer_internal = false, nlb_allowed_cidr_blocks must be a non-empty list to restrict inference endpoint access. To open explicitly to the whole internet, pass [\"0.0.0.0/0\"]."
+  }
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.open_weight :
+      v.load_balancer_internal == true || (v.nlb_allowed_cidr_blocks != null && length(v.nlb_allowed_cidr_blocks) > 0)
+    ])
+    error_message = "eks_deployments.open_weight: when load_balancer_internal = false, nlb_allowed_cidr_blocks must be a non-empty list to restrict inference endpoint access. To open explicitly to the whole internet, pass [\"0.0.0.0/0\"]."
   }
 }
 

@@ -373,13 +373,24 @@ aws secretsmanager describe-secret \
 7. **Next** → skip rotation → **Next** → **Store**.
 
 > [!NOTE]
-> **Secret value format — three accepted shapes** (in the module parser's evaluation order):
+> **Secret value format — must match what you tell the module.**
 >
-> 1. **JSON with `"access-key"`** (recommended) — `{"access-key": "nvapi-..."}`. Self-describing; the key name signals what the secret holds. The module checks for this shape first.
-> 2. **JSON with any other single key** — also works (e.g. `{"api_key": "nvapi-..."}`, `{"value": "nvapi-..."}`) via a fallback that returns the first value of any JSON object.
-> 3. **Plaintext** — just the raw key string `nvapi-...`. No JSON, no quotes, no key=value wrapping. Works, but the stored value is opaque — an SRE inspecting it later has no inline hint about what it represents.
+> The module passes a Secrets Manager reference to CodeBuild in the form
+> `<arn>:<secret_json_key>::`. CodeBuild fetches the value at build start via IAM —
+> the raw key never enters Terraform state or the CodeBuild project config. But the
+> reference format needs to match how you stored the secret:
 >
-> Avoid mixed-format secrets like `{"access-key": "...", "extra": "..."}` — only one value is read, and which one depends on JSON key ordering.
+> 1. **JSON with `"access-key"`** (recommended, matches this sample's `main.tf`):
+>    `{"access-key": "nvapi-..."}` + `ngc_credentials.secret_json_key = "access-key"`.
+> 2. **JSON with a different key name:** set `secret_json_key` to that key
+>    (e.g. `{"my_key": "nvapi-..."}` → `secret_json_key = "my_key"`).
+> 3. **Plaintext** (raw string, no JSON): set `secret_json_key = null` in your
+>    `ngc_credentials` block. The module then references the whole secret value.
+>
+> The `main.tf` in this sample sets `secret_json_key = "access-key"` — matches the
+> recommended JSON shape above. If you use a different format, adjust that field.
+> Mismatch will surface as an `unauthorized` error from `nvcr.io` on the first
+> `terraform apply` (the wrong string gets piped to `docker login`).
 
 #### Path B — inline in Terraform module (less secure, NOT recommended)
 

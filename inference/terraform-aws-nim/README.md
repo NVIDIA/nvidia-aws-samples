@@ -907,26 +907,59 @@ module "inference" {
 ### NGC credentials (NIM images and NGC model artifacts)
 
 ```hcl
-# Recommended — Secrets Manager ARN
+# Recommended — Secrets Manager ARN.
+# secret_json_key = "access-key" means the module references the JSON key named
+# "access-key" from the stored secret. See "Secret format" below.
 ngc_credentials = {
-  secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:ngc-api-key"
+  secret_arn      = "arn:aws:secretsmanager:us-east-1:123456789012:secret:ngc-api-key"
+  secret_json_key = "access-key"
 }
 
-# Development only — stored in Terraform state
+# Development only — stored in Terraform state.
 ngc_credentials = {
   api_key = "nvapi-..."
 }
 ```
 
+#### Secret format
+
+When using `secret_arn`, the module passes an AWS Secrets Manager reference of the form
+`<arn>:<secret_json_key>::` to CodeBuild — CodeBuild fetches the value at build start via
+IAM. The raw key never enters Terraform state or the CodeBuild project configuration.
+
+CodeBuild's SECRETS_MANAGER env-var mode requires you to declare the shape of the secret:
+
+- **Recommended:** create a JSON secret with a key named exactly `access-key`
+  (case-sensitive) and set `secret_json_key = "access-key"` in your `ngc_credentials`
+  block. AWS CLI:
+
+  ```bash
+  aws secretsmanager create-secret \
+    --name my-ngc-key \
+    --secret-string '{"access-key":"<paste-your-NGC-API-key-here>"}' \
+    --region us-east-1
+  ```
+
+- **Plaintext secret:** if the secret is stored as a raw string (no JSON), leave
+  `secret_json_key = null`. The module then passes just the ARN — CodeBuild returns the
+  whole SecretString.
+
+- **Custom JSON key name:** if your secret is JSON with a different key name (e.g.
+  `{"ngc_api_key": "..."}`), set `secret_json_key = "ngc_api_key"`.
+
+Providing both `api_key` and `secret_arn` for either credential is a validation error.
+
 ### HuggingFace credentials (gated open-weight models)
+
+Same shape and semantics as `ngc_credentials`:
 
 ```hcl
 hf_credentials = {
-  secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hf-token"
+  secret_arn      = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hf-token"
+  secret_json_key = "access-key"  # if the secret is JSON with an "access-key" field
 }
 ```
 
-Providing both `api_key` and `secret_arn` for either credential is a validation error.
 Public HuggingFace models do not require `hf_credentials`.
 
 > **Gated models require manual license acceptance before `terraform apply`.**

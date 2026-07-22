@@ -6,7 +6,8 @@ module "terraform-aws-nim" {
   region         = var.region != null ? var.region : data.aws_region.current.region
 
   ngc_credentials = {
-    secret_arn = data.aws_secretsmanager_secret.ngc.arn
+    secret_arn      = data.aws_secretsmanager_secret.ngc.arn
+    secret_json_key = "access-key"
   }
 
   # ---------------------------------------------------------------------------
@@ -65,6 +66,9 @@ module "terraform-aws-nim" {
         source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
         enable_model_profile_cache = true
         helm_chart_version         = "2.0.3"
+
+        # Restrict internet-facing NLB to the deployer's IP.
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
       }
     }
     open_weight = {
@@ -77,6 +81,9 @@ module "terraform-aws-nim" {
         namespace    = "llama-nemotron-nano-8b-ow"
         model_id     = "nvidia/Llama-3.1-Nemotron-Nano-8B-v1"
         model_source = "huggingface"
+
+        # Restrict internet-facing NLB to the deployer's IP.
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
       }
     }
   }

@@ -52,11 +52,11 @@ resource "aws_codebuild_project" "base_sync" {
       value = tostring(each.value.debug)
     }
     dynamic "environment_variable" {
-      for_each = can(regex("^nvcr\\.io/", each.value.source_image_uri)) && local.ngc_api_key != null ? [1] : []
+      for_each = can(regex("^nvcr\\.io/", each.value.source_image_uri)) && local.ngc_cb_env_value != null ? [1] : []
       content {
         name  = "NGC_API_KEY"
-        value = local.ngc_api_key
-        type  = "PLAINTEXT"
+        value = local.ngc_cb_env_value
+        type  = local.ngc_cb_env_type
       }
     }
   }
@@ -222,19 +222,19 @@ resource "aws_codebuild_project" "weight_fetch" {
       value = tostring(each.value.enable_vllm_recipe)
     }
     dynamic "environment_variable" {
-      for_each = local.hf_token != null ? [1] : []
+      for_each = local.hf_cb_env_value != null ? [1] : []
       content {
         name  = "HF_TOKEN"
-        value = local.hf_token
-        type  = "PLAINTEXT"
+        value = local.hf_cb_env_value
+        type  = local.hf_cb_env_type
       }
     }
     dynamic "environment_variable" {
-      for_each = local.ngc_api_key != null && each.value.model_source == "ngc" ? [1] : []
+      for_each = local.ngc_cb_env_value != null && each.value.model_source == "ngc" ? [1] : []
       content {
         name  = "NGC_API_KEY"
-        value = local.ngc_api_key
-        type  = "PLAINTEXT"
+        value = local.ngc_cb_env_value
+        type  = local.ngc_cb_env_type
       }
     }
   }
@@ -351,11 +351,11 @@ resource "aws_codebuild_project" "model_profile_cache" {
       value = tostring(each.value.debug)
     }
     dynamic "environment_variable" {
-      for_each = local.ngc_api_key != null ? [1] : []
+      for_each = local.ngc_cb_env_value != null ? [1] : []
       content {
         name  = "NGC_API_KEY"
-        value = local.ngc_api_key
-        type  = "PLAINTEXT"
+        value = local.ngc_cb_env_value
+        type  = local.ngc_cb_env_type
       }
     }
   }

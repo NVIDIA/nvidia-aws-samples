@@ -36,6 +36,10 @@ module "terraform-aws-nim" {
         model_id     = "nvidia/Llama-3.1-Nemotron-Nano-8B-v1"
         model_source = "huggingface"
 
+        # Restrict the internet-facing NLB to the deployer's IP (module validation
+        # requires this when load_balancer_internal = false).
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
+
         # KEDA ScaledObject scales this vLLM deployment between 1 and 3 replicas
         # based on vllm:kv_cache_usage_perc (auto-derived for open_weight — vLLM
         # exposes this natively on /metrics with the vllm: prefix, distinct from

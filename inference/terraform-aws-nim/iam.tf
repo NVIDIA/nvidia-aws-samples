@@ -254,6 +254,21 @@ data "aws_iam_policy_document" "codebuild_inline" {
     ]
     resources = ["arn:aws:codebuild:${var.region}:${local.account_id}:project/${local.name_prefix}-*"]
   }
+
+  # Secrets Manager fetch — required at build start when CodeBuild environment
+  # variables use type = SECRETS_MANAGER (see local.ngc_cb_env_type / hf_cb_env_type).
+  # Scoped tightly to only the ARN(s) the customer supplied — no wildcards.
+  dynamic "statement" {
+    for_each = compact([
+      try(var.ngc_credentials.secret_arn, null),
+      try(var.hf_credentials.secret_arn, null),
+    ])
+    content {
+      sid       = "SecretsManagerRead${statement.key}"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = [statement.value]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "codebuild" {

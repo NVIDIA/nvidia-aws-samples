@@ -17,7 +17,8 @@ module "terraform-aws-nim" {
   region         = var.region != null ? var.region : data.aws_region.current.region
 
   ngc_credentials = {
-    secret_arn = data.aws_secretsmanager_secret.ngc.arn
+    secret_arn      = data.aws_secretsmanager_secret.ngc.arn
+    secret_json_key = "access-key"
   }
 
   eks_clusters = {
@@ -78,6 +79,12 @@ module "terraform-aws-nim" {
         nim_type         = "custom"
         protocol         = "grpc"
         # port defaults to 8001 (gRPC convention for Maxine NIMs)
+
+        # Restrict the inference NLB to the deployer's IP. The internet-facing NLB
+        # otherwise accepts traffic from 0.0.0.0/0 (see the module README's
+        # "Networking / access control" section for the alternatives — internal-only
+        # LB, or explicit ["0.0.0.0/0"] to opt into an open endpoint).
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
 
         # KEDA ScaledObject scales SVD 1→3 replicas based on
         # DCGM_FI_DEV_GPU_UTIL (auto-derived because nim_type=custom). SVD

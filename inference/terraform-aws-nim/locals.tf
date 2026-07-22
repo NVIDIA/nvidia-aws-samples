@@ -522,6 +522,36 @@ locals {
       local.hf_secret_raw
     )
   ) : null
+
+  # CodeBuild environment_variable dispatch for NGC and HF credentials.
+  # When secret_arn is set: use SECRETS_MANAGER type with a reference string so
+  #   CodeBuild fetches the value at build start (secretsmanager:GetSecretValue).
+  #   The raw value never lands in Terraform state or CodeBuild project config.
+  # When api_key/token is set (development-only path): use PLAINTEXT type.
+  # Format for SECRETS_MANAGER reference:
+  #   Plaintext secret:  "<arn>"       (no colons — CodeBuild returns whole value)
+  #   Key/value secret:  "<arn>:<key>::"  (extracts the named JSON key)
+  ngc_cb_env_value = var.ngc_credentials == null ? null : (
+    var.ngc_credentials.secret_arn != null
+    ? (
+      var.ngc_credentials.secret_json_key != null
+      ? "${var.ngc_credentials.secret_arn}:${var.ngc_credentials.secret_json_key}::"
+      : var.ngc_credentials.secret_arn
+    )
+    : var.ngc_credentials.api_key
+  )
+  ngc_cb_env_type = var.ngc_credentials != null && var.ngc_credentials.secret_arn != null ? "SECRETS_MANAGER" : "PLAINTEXT"
+
+  hf_cb_env_value = var.hf_credentials == null ? null : (
+    var.hf_credentials.secret_arn != null
+    ? (
+      var.hf_credentials.secret_json_key != null
+      ? "${var.hf_credentials.secret_arn}:${var.hf_credentials.secret_json_key}::"
+      : var.hf_credentials.secret_arn
+    )
+    : var.hf_credentials.token
+  )
+  hf_cb_env_type = var.hf_credentials != null && var.hf_credentials.secret_arn != null ? "SECRETS_MANAGER" : "PLAINTEXT"
 }
 
 # --- Open weight locals ---

@@ -93,6 +93,29 @@ variable "ngc_api_key" {
   description = "Resolved NGC API key. Required at pod startup for NIM license validation even when image is from ECR."
 }
 
+# CodeBuild env-var pair for NGC credentials.
+# ngc_cb_env_value carries either the resolved api_key (PLAINTEXT) or a Secrets Manager
+# reference string like "<arn>:<json-key>::" (SECRETS_MANAGER). ngc_cb_env_type selects
+# which CodeBuild env-var mode to use. Set together by the root module.
+variable "ngc_cb_env_value" {
+  type        = string
+  default     = null
+  sensitive   = true
+  description = "CodeBuild env-var value for NGC_API_KEY — resolved API key when using PLAINTEXT mode, or Secrets Manager reference string when using SECRETS_MANAGER mode."
+}
+
+variable "ngc_cb_env_type" {
+  type        = string
+  default     = "PLAINTEXT"
+  description = "CodeBuild env-var type for NGC_API_KEY. Either PLAINTEXT (dev, resolved value) or SECRETS_MANAGER (prod, ARN reference resolved by CodeBuild at build start)."
+}
+
+variable "ngc_secret_arn" {
+  type        = string
+  default     = null
+  description = "NGC Secrets Manager ARN, when SECRETS_MANAGER mode is in use. Grants secretsmanager:GetSecretValue on this ARN to the deploy CodeBuild role. Null when using PLAINTEXT mode."
+}
+
 # ---------------------------------------------------------------------------
 # Model profile cache
 # ---------------------------------------------------------------------------
@@ -221,7 +244,13 @@ variable "node_pool_name" {
 variable "load_balancer_internal" {
   type        = bool
   default     = false
-  description = "When true, annotates the NIM Service as internal-facing (VPC only). When false, creates an internet-facing NLB."
+  description = "When true, annotates the NIM Service as internal-facing (VPC only). When false, creates an internet-facing NLB (which must be paired with nlb_allowed_cidr_blocks — enforced by the root variable validation)."
+}
+
+variable "nlb_allowed_cidr_blocks" {
+  type        = list(string)
+  default     = null
+  description = "CIDR blocks allowed to reach the inference NLB. Renders as loadBalancerSourceRanges on the Service; the LB controller writes these into the NLB security group ingress rules. Required when load_balancer_internal = false. Pass [\"0.0.0.0/0\"] to open explicitly to the internet."
 }
 
 variable "additional_scripts" {

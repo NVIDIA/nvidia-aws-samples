@@ -6,7 +6,8 @@ module "terraform-aws-nim" {
   region         = var.region != null ? var.region : data.aws_region.current.region
 
   ngc_credentials = {
-    secret_arn = data.aws_secretsmanager_secret.ngc.arn
+    secret_arn      = data.aws_secretsmanager_secret.ngc.arn
+    secret_json_key = "access-key"
   }
 
   eks_clusters = {
@@ -33,6 +34,10 @@ module "terraform-aws-nim" {
         source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
         enable_model_profile_cache = true
         helm_chart_version         = "2.0.3"
+
+        # Restrict the internet-facing NLB to the deployer's IP (module validation
+        # requires this when load_balancer_internal = false).
+        nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
         # KEDA ScaledObject scales this deployment between 1 and 3 replicas
         # based on NIM-native gpu_cache_usage_perc (auto-derived from nim_type=llm).
         # Under load, Karpenter provisions additional g6e.xlarge nodes as pods pend.

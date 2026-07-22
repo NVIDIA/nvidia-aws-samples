@@ -4,10 +4,27 @@ phases:
   install:
     commands:
       - '[ "$VERBOSE" = "true" ] && set -x || true'
+      # kubectl — pinned version + SHA256 verification. Bump both to upgrade;
+      # get the checksum from https://dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256
       - |
-        curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+        KUBECTL_VERSION=v1.31.0
+        KUBECTL_SHA256=7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437
+        curl -sLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -
         chmod +x kubectl && mv kubectl /usr/local/bin/
-      - 'curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash'
+      # Helm — pinned version + SHA256 verification. Replaces the previous
+      # `curl … | bash` install-from-main pattern (see
+      # https://helm.sh/docs/intro/install/ for upstream's own recommendation).
+      # Bump HELM_VERSION and HELM_SHA256 together; get the checksum from
+      # https://get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum
+      - |
+        HELM_VERSION=v3.16.4
+        HELM_SHA256=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+        curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o helm.tar.gz
+        echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+        tar -xzf helm.tar.gz
+        mv linux-amd64/helm /usr/local/bin/
+        rm -rf helm.tar.gz linux-amd64
       - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
   pre_build:
@@ -76,6 +93,21 @@ phases:
   build:
     commands:
       - '[ "$LOAD_BALANCER_INTERNAL" = "true" ] && LB_SCHEME="internal" || LB_SCHEME="internet-facing"'
+
+      # Render loadBalancerSourceRanges YAML from NLB_ALLOWED_CIDR_BLOCKS (comma
+      # separated). Empty when unset — the field is omitted from Service specs.
+      # Indent = 2 spaces to match sibling of spec.type / service.type in the
+      # RENDERED YAML files (relative to spec:/service: at column 0). The buildspec's
+      # heredocs strip the 8-column YAML block indent before writing content.
+      - |
+        LB_SOURCE_RANGES_YAML=""
+        if [ -n "${NLB_ALLOWED_CIDR_BLOCKS}" ]; then
+          LB_SOURCE_RANGES_YAML="  loadBalancerSourceRanges:"$'\n'
+          IFS=',' read -ra CIDRS <<< "${NLB_ALLOWED_CIDR_BLOCKS}"
+          for c in "${CIDRS[@]}"; do
+            LB_SOURCE_RANGES_YAML+="    - \"${c}\""$'\n'
+          done
+        fi
 
       # Open-weight: raw kubectl Deployment+Service. Init syncs weights from
       # S3; main runs vllm serve. NIM path is the Helm flow below.
@@ -187,7 +219,7 @@ phases:
             app: ${RELEASE_NAME}
           type: LoadBalancer
           loadBalancerClass: eks.amazonaws.com/nlb
-          ports:
+        ${LB_SOURCE_RANGES_YAML}  ports:
             - name: http
               port: 8000
               targetPort: 8000
@@ -320,7 +352,7 @@ phases:
             app: ${RELEASE_NAME}
           type: LoadBalancer
           loadBalancerClass: eks.amazonaws.com/nlb
-          ports:
+        ${LB_SOURCE_RANGES_YAML}  ports:
             - name: grpc
               port: ${PORT}
               targetPort: ${PORT}
@@ -390,7 +422,7 @@ phases:
           type: LoadBalancer
           port: ${PORT}
           loadBalancerClass: "eks.amazonaws.com/nlb"
-          annotations:
+        ${LB_SOURCE_RANGES_YAML}  annotations:
             service.beta.kubernetes.io/aws-load-balancer-type: "external"
             service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
             service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
@@ -417,7 +449,7 @@ phases:
         service:
           type: LoadBalancer
           loadBalancerClass: "eks.amazonaws.com/nlb"
-          annotations:
+        ${LB_SOURCE_RANGES_YAML}  annotations:
             service.beta.kubernetes.io/aws-load-balancer-type: "external"
             service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
             service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
