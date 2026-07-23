@@ -31,17 +31,7 @@ resource "aws_ecr_lifecycle_policy" "nim" {
 
   policy = var.ecr_image_retention_days != null ? jsonencode({
     rules = [
-      {
-        rulePriority = 1
-        description  = "Expire untagged images after 14 days"
-        selection = {
-          tagStatus   = "untagged"
-          countType   = "sinceImagePushed"
-          countUnit   = "days"
-          countNumber = 14
-        }
-        action = { type = "expire" }
-      },
+      local.ecr_untagged_expire_rule,
       {
         rulePriority = 2
         description  = "Expire all images older than ${var.ecr_image_retention_days} days"
@@ -56,17 +46,7 @@ resource "aws_ecr_lifecycle_policy" "nim" {
     ]
     }) : jsonencode({
     rules = [
-      {
-        rulePriority = 1
-        description  = "Expire untagged images after 14 days"
-        selection = {
-          tagStatus   = "untagged"
-          countType   = "sinceImagePushed"
-          countUnit   = "days"
-          countNumber = 14
-        }
-        action = { type = "expire" }
-      },
+      local.ecr_untagged_expire_rule,
       {
         rulePriority = 2
         description  = "Keep last 10 tagged images"

@@ -85,6 +85,7 @@ phases:
           if [ -z "$LATEST_ID" ] || [ "$LATEST_ID" = "None" ]; then
             echo "No builds found for $BASE_SYNC_PROJECT — assuming complete."
           else
+            SAW_SUCCESS=false
             for i in $(seq 1 180); do
               STATUS=$(aws codebuild batch-get-builds --ids "$LATEST_ID" \
                 --query 'builds[0].buildStatus' --output text 2>/dev/null || echo "UNKNOWN")
@@ -95,11 +96,19 @@ phases:
                   exit 1
                 fi
                 echo "base-sync complete — proceeding."
+                SAW_SUCCESS=true
                 break
               fi
               echo "[$i/180] base-sync in progress — waiting 10 s..."
               sleep 10
             done
+            # If the loop exhausted all 180 iterations without observing a terminal
+            # status, treat that as a hard failure — pulling a potentially half-baked
+            # base image into cache generation is worse than failing loudly here.
+            if [ "$SAW_SUCCESS" != "true" ]; then
+              echo "ERROR: base-sync did not reach SUCCEEDED within the 30-minute polling window — aborting."
+              exit 1
+            fi
           fi
         fi
 
@@ -128,13 +137,16 @@ phases:
           exit 0
         fi
 
-        # Run list-model-profiles
+        # Run list-model-profiles — disable xtrace before the docker invocation
+        # so VERBOSE=true doesn't echo the NGC_API_KEY expansion into CloudWatch.
         echo "=== [$(date -u '+%H:%M:%S')] Running list-model-profiles on $NIM_IMAGE ==="
         T=$(date +%s)
+        { set +x; } 2>/dev/null
         RAW_PROFILES=$(docker run --rm \
           -e NGC_API_KEY="${NGC_API_KEY:-}" \
           "$NIM_IMAGE" \
           list-model-profiles 2>&1)
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
 
         echo "=== [$(date -u '+%H:%M:%S')] list-model-profiles complete ($(($(date +%s) - T))s) ==="
         if [ "${VERBOSE:-false}" = "true" ]; then
@@ -248,6 +260,9 @@ phases:
 
         echo "=== [$(date -u '+%H:%M:%S')] Downloading: $SELECTED_PROFILE ($SELECTED_HASH) ==="
         T=$(date +%s)
+        # Disable xtrace before the docker invocation so the NGC_API_KEY env-var
+        # expansion is not echoed to CloudWatch when VERBOSE=true.
+        { set +x; } 2>/dev/null
         if ! docker run --rm \
           -e NGC_API_KEY="${NGC_API_KEY:-}" \
           -e NIM_CACHE_PATH="${CACHE_PATH:-/opt/nim/.cache}" \
@@ -257,6 +272,7 @@ phases:
           echo "ERROR: download-to-cache failed — aborting."
           exit 1
         fi
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
         echo "=== [$(date -u '+%H:%M:%S')] Download complete ($(($(date +%s) - T))s) ==="
 
         # download-to-cache exits 0 even when it silently skips ("profile doesn't exist").

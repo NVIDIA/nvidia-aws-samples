@@ -16,9 +16,13 @@ module "terraform-aws-nim" {
   environment    = "dev"
   region         = var.region != null ? var.region : data.aws_region.current.region
 
-  ngc_credentials = {
-    secret_arn      = data.aws_secretsmanager_secret.ngc.arn
+  # Path A (Secrets Manager, recommended) when ngc_secret_name is set.
+  # Path B (inline api_key, dev-only) when ngc_api_key is set. Exactly one is required.
+  ngc_credentials = var.ngc_secret_name != null ? {
+    secret_arn      = data.aws_secretsmanager_secret.ngc[0].arn
     secret_json_key = "access-key"
+    } : {
+    api_key = var.ngc_api_key
   }
 
   eks_clusters = {

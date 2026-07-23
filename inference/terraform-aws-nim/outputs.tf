@@ -126,11 +126,17 @@ output "s3_model_assets_bucket" {
 }
 
 output "model_weights_s3_uris" {
-  description = "Map of endpoint key to S3 URI where open-weight model files were downloaded. Only includes open-weight endpoints (model_id set). Empty when no open-weight endpoints exist."
-  value = {
-    for k in keys(var.sagemaker_endpoints.open_weight) :
-    k => "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.open_weight_s3_prefix[k]}"
-  }
+  description = "Map of deployment key to S3 URI where open-weight model files were downloaded. Includes both sagemaker_endpoints.open_weight and eks_deployments.open_weight entries. Keys are suffixed with '-sm' or '-eks' to keep the two platforms distinct in a single map. Empty when no open-weight deployments exist."
+  value = merge(
+    {
+      for k in keys(var.sagemaker_endpoints.open_weight) :
+      "${k}-sm" => "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.open_weight_s3_prefix[k]}"
+    },
+    {
+      for k in keys(var.eks_deployments.open_weight) :
+      "${k}-eks" => "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.eks_open_weight_s3_prefix[k]}"
+    }
+  )
 }
 
 output "model_profile_cache_uris" {

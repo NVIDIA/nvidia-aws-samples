@@ -50,6 +50,14 @@ variable "endpoint_private_access" {
   type        = bool
   default     = true
   description = "Enable private EKS API server endpoint. Must be true — CodeBuild is VPC-placed."
+
+  # Enforce the invariant at plan time: the cluster-setup and deploy CodeBuild
+  # projects both run inside the cluster VPC (no NAT to a public EKS endpoint)
+  # and would fail with a hard-to-diagnose connectivity error at build time.
+  validation {
+    condition     = var.endpoint_private_access == true
+    error_message = "endpoint_private_access must be true — the module's CodeBuild projects run inside the cluster VPC and require the private API server endpoint to reach the control plane."
+  }
 }
 
 variable "public_access_cidrs" {

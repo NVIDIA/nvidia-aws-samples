@@ -26,12 +26,17 @@ phases:
         echo "=== [$(date -u '+%H:%M:%S')] Base Sync: authenticating with ECR ==="
       - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
       - |
+        # Disable xtrace inside the NGC auth block so VERBOSE=true doesn't echo
+        # the NGC_API_KEY expansion to CloudWatch. Restore xtrace afterwards
+        # (or leave off if VERBOSE was never enabled).
+        { set +x; } 2>/dev/null
         if [ -n "${NGC_API_KEY:-}" ]; then
           echo "NGC API key present — authenticating with nvcr.io"
           echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
         else
           echo "No NGC API key — ECR/IAM auth only."
         fi
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
         echo "=== [$(date -u '+%H:%M:%S')] pre_build complete ($(($(date +%s) - PHASE_START))s) ==="
 
   build:

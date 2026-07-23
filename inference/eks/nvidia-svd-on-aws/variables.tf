@@ -6,5 +6,13 @@ variable "region" {
 
 variable "ngc_secret_name" {
   type        = string
-  description = "Name of the AWS Secrets Manager secret containing the NGC API key (plaintext). The NGC account must be approved for the 'AI for Media Private Access Program' which gates the SVD image."
+  default     = null
+  description = "Name of the AWS Secrets Manager secret containing the NGC API key. Required for Path A (Secrets Manager); leave null for Path B (inline api_key). The NGC account must be approved for the 'AI for Media Private Access Program' which gates the SVD image."
+}
+
+variable "ngc_api_key" {
+  type        = string
+  default     = null
+  sensitive   = true
+  description = "NGC API key as a raw string (Path B — inline). When set, ngc_secret_name is ignored and the value flows into Terraform state. Use only for local dev / short-lived POCs; prefer Path A (secret_arn) for anything shared. Exactly one of ngc_secret_name / ngc_api_key must be set."
 }

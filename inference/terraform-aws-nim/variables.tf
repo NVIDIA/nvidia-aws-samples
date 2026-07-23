@@ -756,8 +756,8 @@ variable "eks_deployments" {
       debug                  — Verbose CodeBuild output for this deployment only.
       force_rebuild          — Force re-deploy on next apply regardless of input changes.
       autoscaling            — Same schema as eks_deployments.nim.autoscaling above. Default
-                               metric for open_weight is `gpu_cache_usage_perc` (vLLM exposes
-                               it natively on /metrics).
+                               metric for open_weight is `vllm:kv_cache_usage_perc` (vLLM V1
+                               emits the metric with the `vllm:` prefix natively on /metrics).
   EOD
 
   validation {

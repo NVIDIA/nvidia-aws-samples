@@ -1,7 +1,7 @@
 locals {
   # AZ IDs (use1-az1, ...) are stable across accounts; AZ names (us-east-1a, ...) are not.
   # See root README "Multi-AZ design for GPU capacity" for the rationale + AWS docs.
-  az_ids   = slice(data.aws_availability_zones.available.zone_ids, 0, 4)
+  az_ids   = slice(data.aws_availability_zones.available.zone_ids, 0, min(4, length(data.aws_availability_zones.available.zone_ids)))
   vpc_cidr = "10.0.0.0/16"
 }
 

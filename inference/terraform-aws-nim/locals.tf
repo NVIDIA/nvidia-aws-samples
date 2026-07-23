@@ -523,6 +523,20 @@ locals {
   hf_secret_arn       = try(var.hf_credentials.secret_arn, null) != null ? var.hf_credentials.secret_arn : ""
   hf_secret_json_key  = try(var.hf_credentials.secret_json_key, null) != null ? var.hf_credentials.secret_json_key : ""
 
+  # Shared ECR lifecycle rule — used by both branches of aws_ecr_lifecycle_policy.nim.
+  # Extracted so the two branches focus only on what differs (retention Rule 2).
+  ecr_untagged_expire_rule = {
+    rulePriority = 1
+    description  = "Expire untagged images after 14 days"
+    selection = {
+      tagStatus   = "untagged"
+      countType   = "sinceImagePushed"
+      countUnit   = "days"
+      countNumber = 14
+    }
+    action = { type = "expire" }
+  }
+
   # CodeBuild environment_variable dispatch for NGC and HF credentials.
   # When secret_arn is set: use SECRETS_MANAGER type with a reference string so
   #   CodeBuild fetches the value at build start (secretsmanager:GetSecretValue).

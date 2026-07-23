@@ -96,3 +96,60 @@ resource "aws_s3_bucket" "sagemaker_output" {
     Name = "${local.name_prefix}-sagemaker-output-${random_id.suffix.hex}"
   })
 }
+
+# model_assets versioning — same rationale as nim_cache: a failed partial
+# re-download of multi-GB open-weight artifacts by weight-fetch CodeBuild
+# could silently corrupt an already-working weights prefix.
+resource "aws_s3_bucket_versioning" "model_assets" {
+  count = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0 ? 1 : 0
+
+  region = var.region
+  bucket = aws_s3_bucket.model_assets[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Public-access blocks on all four module-managed buckets. Belt-and-suspenders
+# on top of the consumer's account-level defaults, so this module is safe
+# regardless of how the consumer AWS account is configured.
+resource "aws_s3_bucket_public_access_block" "codebuild" {
+  region                  = var.region
+  bucket                  = aws_s3_bucket.codebuild.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "nim_cache" {
+  count = length(local.endpoints_with_cache) > 0 ? 1 : 0
+
+  region                  = var.region
+  bucket                  = aws_s3_bucket.nim_cache[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "model_assets" {
+  count = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0 ? 1 : 0
+
+  region                  = var.region
+  bucket                  = aws_s3_bucket.model_assets[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "sagemaker_output" {
+  region                  = var.region
+  bucket                  = aws_s3_bucket.sagemaker_output.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}

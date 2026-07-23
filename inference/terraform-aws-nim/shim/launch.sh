@@ -147,7 +147,10 @@ fi
 # User args (VLLM_USER_ARGS) come last so they override any recipe defaults.
 if [ -n "${VLLM_USER_ARGS:-}${RECIPE_BASE_ARGS:-}${RECIPE_EXTRA_ARGS:-}" ]; then
     ORIGINAL_CMD="${ORIGINAL_CMD} ${RECIPE_BASE_ARGS:-} ${RECIPE_EXTRA_ARGS:-} ${VLLM_USER_ARGS:-}"
-    echo "Final vLLM command: ${ORIGINAL_CMD}"
+    # Redact NGC_API_KEY / HF_TOKEN if either was passed as a CLI flag through
+    # VLLM_USER_ARGS or RECIPE_EXTRA_ARGS. Uses the same sed pattern as the
+    # env dump below. The unredacted $ORIGINAL_CMD is still what actually runs.
+    echo "Final vLLM command: $(printf '%s' "$ORIGINAL_CMD" | sed -E 's/(NGC_API_KEY|HF_TOKEN)=[^ ]*/\1=<REDACTED>/g')"
 fi
 
 # Additional scripts — run in the order defined in additional_scripts[].
@@ -155,15 +158,28 @@ fi
 # additional_scripts[*].source; local files are uploaded to S3 automatically).
 # All scripts complete before Caddy and NIM start. A non-zero exit aborts startup.
 if [ -n "${ADDITIONAL_SCRIPTS:-}" ]; then
+    # Avoid the "echo | while" pipe-subshell pattern — under POSIX sh the loop body
+    # runs in a subshell, so a script's non-zero exit or an `exit` inside the loop
+    # would not terminate this parent launch.sh. Use a here-string via a tempfile
+    # (POSIX-safe: no bash <<< or process substitution) and check each script's
+    # exit code explicitly so a failure actually aborts container startup.
+    printf '%s\n' "$ADDITIONAL_SCRIPTS" > /tmp/additional_scripts.list
     i=0
-    echo "$ADDITIONAL_SCRIPTS" | while IFS= read -r uri; do
+    while IFS= read -r uri; do
         [ -z "$uri" ] && continue
         echo "=== [$(date -u '+%H:%M:%S')] Running additional script [$i]: $uri ==="
-        aws s3 cp "$uri" /tmp/additional_script_${i}.sh
+        if ! aws s3 cp "$uri" /tmp/additional_script_${i}.sh; then
+            echo "ERROR: failed to download additional script [$i]: $uri — aborting startup"
+            exit 1
+        fi
         chmod +x /tmp/additional_script_${i}.sh
-        /tmp/additional_script_${i}.sh
+        if ! /tmp/additional_script_${i}.sh; then
+            echo "ERROR: additional script [$i] exited non-zero: $uri — aborting startup"
+            exit 1
+        fi
         i=$((i + 1))
-    done
+    done < /tmp/additional_scripts.list
+    rm -f /tmp/additional_scripts.list
 fi
 
 # Check if Caddy is already present
@@ -212,7 +228,7 @@ env | sed -E 's/^(NGC_API_KEY|HF_TOKEN)=.*/\1=<REDACTED>/'
 # Newer NIM versions (e.g. nemotron-3-nano 2.0.2+) do not ship nvidia_entrypoint.sh —
 # they set up the NVIDIA environment in the image and run the NIM command directly.
 if [ -f "$ORIGINAL_ENTRYPOINT" ]; then
-    echo "Running $ORIGINAL_ENTRYPOINT $ORIGINAL_CMD ..."
+    echo "Running $ORIGINAL_ENTRYPOINT $(printf '%s' "$ORIGINAL_CMD" | sed -E 's/(NGC_API_KEY|HF_TOKEN)=[^ ]*/\1=<REDACTED>/g') ..."
     $ORIGINAL_ENTRYPOINT $ORIGINAL_CMD &
     NIM_PID=$!
 else

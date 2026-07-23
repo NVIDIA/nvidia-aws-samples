@@ -318,11 +318,11 @@ The key looks like `nvapi-` followed by ~64 alphanumeric characters.
 ### Step 3 — Store the key in AWS
 
 > [!IMPORTANT]
-> **Required.** Terraform reads this key to inject NGC credentials into the EKS workload. Two storage paths supported; choose one.
+> **Required.** The NGC API key authenticates the module against `nvcr.io` (image pulls) and NGC model artifact endpoints. Two storage paths supported; choose one.
 
 #### Path A — AWS Secrets Manager (recommended, more secure)
 
-The key lives in Secrets Manager. The Terraform module reads it at apply time and never writes the value to state.
+The key lives in Secrets Manager. Terraform reads only the secret ARN (via `data.aws_secretsmanager_secret.ngc`); the raw key value is never written to Terraform state. CodeBuild retrieves the value at build start via IAM (`secretsmanager:GetSecretValue` scoped to the specific ARN), and the SageMaker path fetches it at container startup through the shim — so the value only exists in the running build/container process environment.
 
 **A1. Via AWS CLI** (faster, scriptable):
 
@@ -394,19 +394,16 @@ aws secretsmanager describe-secret \
 
 #### Path B — inline in Terraform module (less secure, NOT recommended)
 
-The module accepts an `api_key` field directly. The key ends up in Terraform state, which is why this is discouraged.
+The module accepts an `api_key` field directly through the `ngc_api_key` variable. The key ends up in Terraform state, which is why this is discouraged. No `main.tf` edits required — the module already conditionally dispatches on which variable is set.
 
-In `main.tf`, replace the `ngc_credentials` block:
+`main.tf` selects Path A / Path B automatically based on which variable is set:
 
 ```hcl
-# Replace this:
-ngc_credentials = {
-  secret_arn = data.aws_secretsmanager_secret.ngc.arn
-}
-
-# With this:
-ngc_credentials = {
-  api_key = "<PASTE_YOUR_NGC_API_KEY_HERE>"
+ngc_credentials = var.ngc_secret_name != null ? {
+  secret_arn      = data.aws_secretsmanager_secret.ngc[0].arn
+  secret_json_key = "access-key"
+} : {
+  api_key = var.ngc_api_key
 }
 ```
 
@@ -422,11 +419,14 @@ cd nvidia-svd-on-aws
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars`:
+Edit `terraform.tfvars` — set **exactly one** of the two variables:
 
 ```hcl
-ngc_secret_name = "svd-ngc-api-key"   # the secret name from Step 3 (Path A)
-# If you went Path B (inline), this var is ignored — leave it as the placeholder.
+# Path A (recommended) — Secrets Manager
+ngc_secret_name = "svd-ngc-api-key"
+
+# Path B (dev-only) — inline key. Leave ngc_secret_name = null (or omit it).
+# ngc_api_key = "nvapi-XXXXXXXXXXXXXXXXXXXXXXXX"
 ```
 
 If you need to change the deploy region (default us-east-1) or other knobs, see [variables.tf](variables.tf).

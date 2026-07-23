@@ -7,7 +7,7 @@ locals {
   # may land in two that both lack g6e capacity → pod stuck Pending with
   # InsufficientInstanceCapacity. 4 AZs maximizes the chance Karpenter finds a healthy AZ.
   # See README "Multi-GPU and scaling" → "Diversify AZs within a region".
-  az_ids   = slice(data.aws_availability_zones.available.zone_ids, 0, 4)
+  az_ids   = slice(data.aws_availability_zones.available.zone_ids, 0, min(4, length(data.aws_availability_zones.available.zone_ids)))
   vpc_cidr = "10.0.0.0/16"
 }
 
