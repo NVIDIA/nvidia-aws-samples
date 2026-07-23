@@ -62,6 +62,54 @@ download_file() {
   fi
 }
 
+# ── Fetch credentials via IAM (SECRETS_MANAGER-safe path) ─────────────────────
+# The SageMaker Model's container Environment is visible to anyone with
+# sagemaker:DescribeModel — plaintext, as-is. To avoid exposing NGC/HF credentials
+# there, Terraform only passes the ARN (+ optional JSON key name). The value is
+# fetched HERE, at container startup, using the SageMaker execution role which
+# holds a scoped secretsmanager:GetSecretValue grant on the specific ARN(s).
+#
+# Format handling matches the module's ngc_credentials.secret_json_key contract:
+#   - If SECRET_JSON_KEY set: extract that key from a JSON secret
+#   - Else: treat the whole SecretString as the value (plaintext secret)
+#
+# Redaction: env-var value is exported for the NIM process but never echoed. The
+# `env` debug dump later in this script scrubs these lines before printing.
+fetch_secret() {
+  arn=$1
+  json_key=$2
+  raw=$(aws secretsmanager get-secret-value --secret-id "$arn" --query SecretString --output text 2>/dev/null)
+  if [ -z "$raw" ]; then
+    echo "WARN: failed to fetch secret $arn — check IAM permissions" >&2
+    return 1
+  fi
+  if [ -n "$json_key" ]; then
+    printf '%s' "$raw" | jq -r --arg k "$json_key" '.[$k] // empty'
+  else
+    printf '%s' "$raw"
+  fi
+}
+
+if [ -z "${NGC_API_KEY:-}" ] && [ -n "${NGC_SECRET_ARN:-}" ]; then
+    echo "Fetching NGC credential from Secrets Manager..."
+    NGC_API_KEY=$(fetch_secret "$NGC_SECRET_ARN" "${NGC_SECRET_JSON_KEY:-}")
+    export NGC_API_KEY
+    if [ -z "$NGC_API_KEY" ]; then
+        echo "ERROR: NGC_API_KEY resolved empty from $NGC_SECRET_ARN — check secret shape and IAM permissions" >&2
+        exit 1
+    fi
+fi
+
+if [ -z "${HF_TOKEN:-}" ] && [ -n "${HF_SECRET_ARN:-}" ]; then
+    echo "Fetching HF token from Secrets Manager..."
+    HF_TOKEN=$(fetch_secret "$HF_SECRET_ARN" "${HF_SECRET_JSON_KEY:-}")
+    export HF_TOKEN
+    if [ -z "$HF_TOKEN" ]; then
+        echo "ERROR: HF_TOKEN resolved empty from $HF_SECRET_ARN — check secret shape and IAM permissions" >&2
+        exit 1
+    fi
+fi
+
 # ── Model profile cache sync ───────────────────────────────────────────────────
 # If MODEL_PROFILE_CACHE is set, sync the pre-cached NGC model profile from S3
 # into CACHE_PATH before NIM starts. ~2-5 min vs ~5-10 min from NGC.
@@ -156,7 +204,9 @@ CADDY_PID=$!
 
 sleep 5
 
-env
+# Debug env dump — redacts credential env vars so CloudWatch never sees the
+# fetched Secrets Manager values or dev-mode inline keys.
+env | sed -E 's/^(NGC_API_KEY|HF_TOKEN)=.*/\1=<REDACTED>/'
 
 # Execute the original container entrypoint script and command.
 # Newer NIM versions (e.g. nemotron-3-nano 2.0.2+) do not ship nvidia_entrypoint.sh —

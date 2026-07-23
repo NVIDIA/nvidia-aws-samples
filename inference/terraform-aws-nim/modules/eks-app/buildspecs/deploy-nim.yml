@@ -434,6 +434,11 @@ phases:
         EOF
               ;;
             speech)
+              # Disable xtrace around credential-handling so VERBOSE=true does
+              # not leak the base64-encoded NGC key into CloudWatch (CodeBuild's
+              # Secrets Manager masking does not apply to derived / transformed
+              # values like base64 encodings).
+              { set +x; } 2>/dev/null
               NGC_KEY_B64=$(printf '%s' "${NGC_API_KEY}" | base64 | tr -d '\n')
               cat > /tmp/nim-values.yaml <<EOF
         image:
@@ -455,6 +460,7 @@ phases:
             service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
             service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
         EOF
+              [ "$VERBOSE" = "true" ] && set -x || true
               ;;
             custom)
               touch /tmp/nim-values.yaml
@@ -528,9 +534,15 @@ phases:
             helm uninstall "$RELEASE_NAME" --namespace "$NAMESPACE" --wait 2>/dev/null || true
           fi
 
-          # Log the generated values.
-          echo "=== /tmp/nim-values.yaml ==="
-          cat -n /tmp/nim-values.yaml
+          # Log the generated values with credential-bearing lines redacted.
+          # The speech path writes a base64-encoded NGC key to
+          # ngcCredentials.password; CodeBuild's Secrets Manager masking does
+          # not cover derived values so we scrub the line here before logging.
+          echo "=== /tmp/nim-values.yaml (credential lines redacted) ==="
+          sed -E '
+            s/^([[:space:]]*password:[[:space:]]*).*/\1"<REDACTED>"/
+            s/^([[:space:]]*ngcAPISecret:[[:space:]]*).*/\1"<REDACTED>"/
+          ' /tmp/nim-values.yaml | cat -n
           echo "=== end /tmp/nim-values.yaml ==="
 
           [ "$VERBOSE" = "true" ] && HELM_FLAGS="--debug" || HELM_FLAGS=""

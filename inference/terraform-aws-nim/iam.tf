@@ -124,6 +124,21 @@ data "aws_iam_policy_document" "sagemaker_inline" {
       ]
     }
   }
+
+  # Secrets Manager fetch — shim/launch.sh calls GetSecretValue at container
+  # startup when NGC_SECRET_ARN or HF_SECRET_ARN is set on the Model. Scoped
+  # tightly to only the ARN(s) the customer supplied.
+  dynamic "statement" {
+    for_each = compact([
+      try(var.ngc_credentials.secret_arn, null),
+      try(var.hf_credentials.secret_arn, null),
+    ])
+    content {
+      sid       = "SageMakerSecretsManagerRead${statement.key}"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = [statement.value]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "sagemaker_inline" {

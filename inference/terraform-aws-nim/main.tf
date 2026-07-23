@@ -19,7 +19,7 @@ resource "terraform_data" "validation" {
   lifecycle {
     # If any endpoint uses nvcr.io, NGC credentials must be present.
     precondition {
-      condition     = local.ngc_api_key != null || !local.any_ngc_endpoint
+      condition     = local.ngc_configured || !local.any_ngc_endpoint
       error_message = "At least one endpoint uses an nvcr.io source image but no NGC API key is configured. Set ngc_credentials.api_key or ngc_credentials.secret_arn."
     }
 

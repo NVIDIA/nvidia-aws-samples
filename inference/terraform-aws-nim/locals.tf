@@ -492,36 +492,36 @@ locals {
 
 # --- Resolved credentials ---
 #
-# Priority: direct value > Secrets Manager ARN.
-# Mutual exclusion (can't set both) is validated in variables.tf per-object.
+# The direct api_key / token fields are the "dev-only" path — the raw value flows
+# through Terraform state and into container env vars unmodified.
+# The secret_arn path is prod-safe — Terraform never sees the value; consumers
+# (CodeBuild via SECRETS_MANAGER env-var type, SageMaker containers via
+# shim/launch.sh) fetch at runtime through IAM.
 locals {
-  # Extracts a credential value from a Secrets Manager secret_string.
-  # Handles three formats automatically:
-  #   1. JSON with "access-key" key  → jsondecode(s)["access-key"]
-  #   2. JSON with any single key    → values(jsondecode(s))[0]
-  #   3. Plain string                → s as-is
-  ngc_secret_raw = try(data.aws_secretsmanager_secret_version.ngc_api_key[0].secret_string, null)
-  hf_secret_raw  = try(data.aws_secretsmanager_secret_version.hf_token[0].secret_string, null)
+  # Dev-only inline values. Null when the customer uses the secret_arn path.
+  ngc_api_key = var.ngc_credentials != null ? var.ngc_credentials.api_key : null
+  hf_token    = var.hf_credentials != null ? var.hf_credentials.token : null
 
-  ngc_api_key = var.ngc_credentials != null ? (
-    var.ngc_credentials.api_key != null
-    ? var.ngc_credentials.api_key
-    : try(
-      jsondecode(local.ngc_secret_raw)["access-key"],
-      values(jsondecode(local.ngc_secret_raw))[0],
-      local.ngc_secret_raw
-    )
-  ) : null
+  # Presence check for cross-variable validation — a credential is "configured"
+  # when either path is set. Used by the "at least one endpoint uses nvcr.io but
+  # no NGC key" precondition without needing the actual value.
+  ngc_configured = var.ngc_credentials != null && (
+    try(var.ngc_credentials.api_key, null) != null ||
+    try(var.ngc_credentials.secret_arn, null) != null
+  )
+  hf_configured = var.hf_credentials != null && (
+    try(var.hf_credentials.token, null) != null ||
+    try(var.hf_credentials.secret_arn, null) != null
+  )
 
-  hf_token = var.hf_credentials != null ? (
-    var.hf_credentials.token != null
-    ? var.hf_credentials.token
-    : try(
-      jsondecode(local.hf_secret_raw)["access-key"],
-      values(jsondecode(local.hf_secret_raw))[0],
-      local.hf_secret_raw
-    )
-  ) : null
+  # ARN + JSON key metadata for downstream consumers (SageMaker container env vars
+  # and any CodeBuild env var referencing the secret via runtime-fetch shell code).
+  # Empty string when the direct path is used — the launch.sh gate checks for
+  # non-empty ARN before attempting to fetch.
+  ngc_secret_arn      = try(var.ngc_credentials.secret_arn, null) != null ? var.ngc_credentials.secret_arn : ""
+  ngc_secret_json_key = try(var.ngc_credentials.secret_json_key, null) != null ? var.ngc_credentials.secret_json_key : ""
+  hf_secret_arn       = try(var.hf_credentials.secret_arn, null) != null ? var.hf_credentials.secret_arn : ""
+  hf_secret_json_key  = try(var.hf_credentials.secret_json_key, null) != null ? var.hf_credentials.secret_json_key : ""
 
   # CodeBuild environment_variable dispatch for NGC and HF credentials.
   # When secret_arn is set: use SECRETS_MANAGER type with a reference string so
@@ -698,10 +698,20 @@ locals {
 # Defined here (not inline in main.tf) so random_id.model_content_suffix can key on
 # them without referencing the model resource itself (which would be circular).
 locals {
+  # NGC_API_KEY / HF_TOKEN carry the inline dev-mode value (or empty).
+  # NGC_SECRET_ARN / NGC_SECRET_JSON_KEY (and HF equivalents) carry the Secrets
+  # Manager reference. shim/launch.sh picks whichever is populated and, in the
+  # ARN case, fetches the value via IAM at container startup — the raw credential
+  # never appears in the Model's ContainerDefinition.Environment (visible via
+  # sagemaker:DescribeModel) or in Terraform state.
   nim_model_env = {
     for k, v in var.sagemaker_endpoints.nim : k => {
-      NGC_API_KEY         = local.ngc_api_key
-      HF_TOKEN            = local.hf_token
+      NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
+      NGC_SECRET_ARN      = local.ngc_secret_arn
+      NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
+      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+      HF_SECRET_ARN       = local.hf_secret_arn
+      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
       CACHE_PATH          = var.cache_path
       MODEL_PROFILE_CACHE = v.enable_model_profile_cache ? "s3://${try(aws_s3_bucket.nim_cache[0].bucket, "")}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
       ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
@@ -716,6 +726,9 @@ locals {
       VLLM_USER_ARGS      = local.extra_args_str[k]
       RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
       ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]
+      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+      HF_SECRET_ARN       = local.hf_secret_arn
+      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
     }
   }
 }

@@ -42,8 +42,10 @@ LABEL com.amazonaws.sagemaker.inference.cuda.verified_versions="${CUDA_DRIVER_LA
 COPY launch.sh caddy-config.json /opt/
 
 # AWS CLI baked in for S3 weight/cache syncs in launch.sh. ~100 MB against a 10-30 GB base.
+# jq baked in so launch.sh can extract JSON keys from Secrets Manager payloads without
+# resolving credentials at Terraform time (see the "Fetch credentials via IAM" block in launch.sh).
 RUN apt-get update \
-    && apt-get install -y curl unzip \
+    && apt-get install -y curl unzip jq \
     && curl -fsSLo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
