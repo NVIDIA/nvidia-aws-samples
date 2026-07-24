@@ -1,0 +1,176 @@
+version: 0.2
+
+# ---------------------------------------------------------------------------
+# Weight Fetch — downloads open weight model files to S3.
+#
+# One CodeBuild project per unique (model_source, model_id, model_revision).
+# Idempotent: skips if S3 prefix already contains a WEIGHTS_COMPLETE marker.
+# Bypassed when FORCE_REBUILD=true.
+#
+# Environment variables (set by codebuild.tf):
+#   MODEL_ID       — HF repo ID (e.g. "meta-llama/Llama-3.1-8B-Instruct")
+#                    or NGC model path with version (e.g. "meta/llama-3.1-8b-instruct:1.0")
+#   MODEL_SOURCE   — "huggingface" or "ngc"
+#   MODEL_REVISION — HF branch/tag/commit (default "main"); ignored for NGC
+#   S3_BUCKET      — destination bucket (model-assets)
+#   S3_PREFIX      — destination prefix within bucket
+#   FORCE_REBUILD        — "true" bypasses the WEIGHTS_COMPLETE marker and recipe checks
+#   ENABLE_VLLM_RECIPE   — "true" fetches recipe from recipes.vllm.ai and writes
+#                          per-precision env files alongside the weights in S3.
+#                          Only runs for model_source = "huggingface".
+#   VERBOSE              — "true" enables set -x
+#   HF_TOKEN             — HuggingFace token for gated models (may be empty)
+#   NGC_API_KEY          — NGC API key for ngc model source (may be empty)
+# ---------------------------------------------------------------------------
+
+phases:
+  install:
+    commands:
+      - '[ "${VERBOSE:-false}" = "true" ] && set -x || true'
+      - |
+        if [ "$MODEL_SOURCE" = "huggingface" ]; then
+          pip install -q huggingface_hub[cli]
+        elif [ "$MODEL_SOURCE" = "ngc" ]; then
+          pip install -q ngc-cli
+        fi
+
+  pre_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        MARKER="s3://${S3_BUCKET}/${S3_PREFIX}/WEIGHTS_COMPLETE"
+        SKIP_WEIGHTS=false
+        SKIP_RECIPE=false
+        if [ "${FORCE_REBUILD:-false}" != "true" ]; then
+          if aws s3 ls "$MARKER" > /dev/null 2>&1; then
+            SKIP_WEIGHTS=true
+            echo "=== Weights already present at s3://${S3_BUCKET}/${S3_PREFIX}/ — skipping download ==="
+          fi
+          if [ "${ENABLE_VLLM_RECIPE:-false}" != "true" ]; then
+            SKIP_RECIPE=true
+          elif aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/recipe_default.env" > /dev/null 2>&1; then
+            SKIP_RECIPE=true
+            echo "=== Recipe already present — skipping fetch ==="
+          fi
+        fi
+        if [ "$SKIP_WEIGHTS" = "true" ] && [ "$SKIP_RECIPE" = "true" ]; then
+          echo "=== Nothing to do — exiting ==="
+          exit 0
+        fi
+        export SKIP_WEIGHTS SKIP_RECIPE
+        echo "=== Starting: model=${MODEL_ID} source=${MODEL_SOURCE} revision=${MODEL_REVISION:-main} skip_weights=${SKIP_WEIGHTS} skip_recipe=${SKIP_RECIPE} ==="
+
+  build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        PHASE_START=$(date +%s)
+        LOCAL_DIR="/tmp/weights"
+        mkdir -p "$LOCAL_DIR"
+
+        # ── Weight download ─────────────────────────────────────────────────
+        if [ "${SKIP_WEIGHTS:-false}" = "true" ]; then
+          echo "=== Skipping weight download (already in S3) ==="
+        else
+          if [ "$MODEL_SOURCE" = "huggingface" ]; then
+            echo "=== [$(date -u '+%H:%M:%S')] Downloading from HuggingFace: ${MODEL_ID} @ ${MODEL_REVISION:-main} ==="
+            T=$(date +%s)
+            if [ -n "${HF_TOKEN:-}" ]; then
+              hf auth login --token "$HF_TOKEN"
+            fi
+            HF_ARGS="${MODEL_ID} --local-dir ${LOCAL_DIR}"
+            if [ -n "${MODEL_REVISION:-}" ] && [ "${MODEL_REVISION}" != "main" ]; then
+              HF_ARGS="$HF_ARGS --revision ${MODEL_REVISION}"
+            fi
+            if ! hf download $HF_ARGS; then
+              echo "ERROR: hf download failed for ${MODEL_ID}. Check HF_TOKEN for gated models."
+              exit 1
+            fi
+            echo "=== [$(date -u '+%H:%M:%S')] HF download complete ($(($(date +%s) - T))s) ==="
+          elif [ "$MODEL_SOURCE" = "ngc" ]; then
+            echo "=== [$(date -u '+%H:%M:%S')] Downloading from NGC: ${MODEL_ID} ==="
+            T=$(date +%s)
+            NGC_ORG=$(echo "$MODEL_ID" | cut -d'/' -f1)
+            NGC_MODEL_VERSION=$(echo "$MODEL_ID" | cut -d'/' -f2)
+            ngc config set --apikey "${NGC_API_KEY}" > /dev/null
+            ngc registry model download-version \
+              "${NGC_ORG}/${NGC_MODEL_VERSION}" \
+              --dest "$LOCAL_DIR"
+            echo "=== [$(date -u '+%H:%M:%S')] NGC download complete ($(($(date +%s) - T))s) ==="
+          else
+            echo "ERROR: unsupported MODEL_SOURCE='${MODEL_SOURCE}'. Must be 'huggingface' or 'ngc'."
+            exit 1
+          fi
+
+          if [ -z "$(find "$LOCAL_DIR" -type f 2>/dev/null)" ]; then
+            echo "ERROR: download wrote no files to ${LOCAL_DIR}."
+            exit 1
+          fi
+
+          if [ -z "${S3_BUCKET:-}" ]; then
+            echo "ERROR: S3_BUCKET is empty — cannot upload weights."
+            exit 1
+          fi
+          echo "=== [$(date -u '+%H:%M:%S')] Uploading to s3://${S3_BUCKET}/${S3_PREFIX}/ ==="
+          T=$(date +%s)
+          aws s3 sync "$LOCAL_DIR/" "s3://${S3_BUCKET}/${S3_PREFIX}/" --no-progress || { echo "ERROR: s3 sync failed"; exit 1; }
+          echo "=== [$(date -u '+%H:%M:%S')] Upload complete ($(($(date +%s) - T))s) ==="
+          echo -n | aws s3 cp - "s3://${S3_BUCKET}/${S3_PREFIX}/WEIGHTS_COMPLETE" || { echo "ERROR: failed to write WEIGHTS_COMPLETE marker"; exit 1; }
+        fi
+
+        # ── vLLM Recipe fetch ───────────────────────────────────────────────
+        # Queries recipes.vllm.ai for this model and writes per-precision env
+        # files to S3. launch.sh sources the file matching vllm_precision at
+        # container startup. Only runs for HF models — NGC has no recipes.
+        if [ "${SKIP_RECIPE:-false}" = "true" ]; then
+          echo "=== Skipping recipe fetch ==="
+        elif [ "${ENABLE_VLLM_RECIPE:-false}" = "true" ] && [ "$MODEL_SOURCE" = "huggingface" ]; then
+          HF_ORG=$(echo "$MODEL_ID" | cut -d'/' -f1)
+          HF_REPO=$(echo "$MODEL_ID" | cut -d'/' -f2-)
+          RECIPE_URL="https://recipes.vllm.ai/${HF_ORG}/${HF_REPO}.json"
+          echo "=== [$(date -u '+%H:%M:%S')] Fetching vLLM recipe from ${RECIPE_URL} ==="
+          RECIPE_JSON=$(curl -sf "$RECIPE_URL" 2>/dev/null | tr -d '\000-\010\013-\014\016-\037' || echo "")
+          if [ -n "$RECIPE_JSON" ]; then
+            BASE_ARGS=$(echo "$RECIPE_JSON" | jq -r '.model.base_args // [] | join(" ")')
+            FIRST_PRECISION=""
+            for PRECISION in $(echo "$RECIPE_JSON" | jq -r '.variants | keys[]'); do
+              VARIANT_ARGS=$(echo "$RECIPE_JSON" | jq -r --arg p "$PRECISION" \
+                '.variants[$p].extra_args // [] | join(" ")')
+              EXTRA_ENV=$(echo "$RECIPE_JSON" | jq -r --arg p "$PRECISION" \
+                '.variants[$p].extra_env // {} | to_entries[] | "export \(.key)=\"\(.value)\""')
+              {
+                echo "export RECIPE_BASE_ARGS=\"${BASE_ARGS}\""
+                echo "export RECIPE_EXTRA_ARGS=\"${VARIANT_ARGS}\""
+                [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV"
+              } > /tmp/recipe_${PRECISION}.env
+              aws s3 cp /tmp/recipe_${PRECISION}.env \
+                "s3://${S3_BUCKET}/${S3_PREFIX}/recipe_${PRECISION}.env"
+              echo "=== Recipe written: recipe_${PRECISION}.env (base='${BASE_ARGS}' variant='${VARIANT_ARGS}') ==="
+              [ -z "$FIRST_PRECISION" ] && FIRST_PRECISION="$PRECISION"
+            done
+            # Always write recipe_default.env so vllm_precision = "default" resolves.
+            # Prefer bf16 if present; otherwise use the first precision found.
+            DEFAULT_SRC=$(echo "$RECIPE_JSON" | jq -r '.variants | keys | map(select(. == "bf16")) | .[0] // empty')
+            [ -z "$DEFAULT_SRC" ] && DEFAULT_SRC="$FIRST_PRECISION"
+            if [ -n "$DEFAULT_SRC" ] && [ -f "/tmp/recipe_${DEFAULT_SRC}.env" ]; then
+              aws s3 cp "/tmp/recipe_${DEFAULT_SRC}.env" \
+                "s3://${S3_BUCKET}/${S3_PREFIX}/recipe_default.env"
+              echo "=== recipe_default.env aliased from ${DEFAULT_SRC} ==="
+            fi
+          else
+            echo "=== WARNING: No vLLM recipe at ${RECIPE_URL} — endpoint will use vLLM defaults ==="
+          fi
+        fi
+
+        echo "=== [$(date -u '+%H:%M:%S')] build complete ($(($(date +%s) - PHASE_START))s) ==="
+
+  post_build:
+    commands:
+      - |
+        [ "${VERBOSE:-false}" = "true" ] && set -x || true
+        SIZE_BYTES=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" --recursive 2>/dev/null \
+          | grep -v 'WEIGHTS_COMPLETE' | awk '{sum += $3} END {print sum+0}')
+        if [ "${SIZE_BYTES:-0}" -gt 0 ] 2>/dev/null; then
+          SIZE_GB=$(awk "BEGIN { printf \"%.1f\", $SIZE_BYTES / 1073741824 }")
+          echo "=== Weights summary: s3://${S3_BUCKET}/${S3_PREFIX}/ (${SIZE_GB} GB) ==="
+        fi

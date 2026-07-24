@@ -1,0 +1,34 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local test artifacts
+*.mp4
+*.csv
+sample_data/
+
+# Vendored terraform-aws-nim carries internal-only files in the source repo
+# (Claude Code instructions, agent notes, browser MCP debug artifacts).
+# These aren't customer-facing; don't commit them if a refresh drops them in.
+# Preferred rsync incantation excludes them at source — see CONTRIBUTING.md
+# or `scripts/refresh-vendored-module.sh` when we formalize this.
+modules/terraform-aws-nim/.claude/
+modules/terraform-aws-nim/AGENTS.md
+modules/terraform-aws-nim/.playwright-mcp/

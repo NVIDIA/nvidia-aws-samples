@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and set EXACTLY ONE of the two variables
+# below. The module conditionally dispatches on which one is populated.
+#
+# Path A (recommended) — Name of the Secrets Manager secret holding your NGC
+# API key. The secret should be a JSON key/value with an `access-key` field,
+# e.g. { "access-key": "nvapi-..." }.
+ngc_secret_name = "your-ngc-secret-name"
+
+# Path B (dev-only) — Inline NGC API key. Uncomment + paste the raw key here
+# and leave ngc_secret_name = null (or delete that line entirely). The value
+# ends up in Terraform state — use only for local dev / short-lived POCs.
+# ngc_api_key = "nvapi-XXXXXXXXXXXXXXXXXXXXXXXX"
+
+# The NGC account must be approved for the "AI for Media Private Access Program"
+# either way — image pull from nvcr.io fails without that entitlement.
