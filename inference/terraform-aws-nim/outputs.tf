@@ -33,7 +33,7 @@ output "s3_build_bucket" {
 
 output "s3_cache_bucket" {
   description = "S3 bucket for NGC model profile cache. Cache prefixes: nim-cache/{image-name}-{version}/{instance-type}/ per unique (image, instance) combo. Null when no endpoints have enable_model_profile_cache = true."
-  value       = try(aws_s3_bucket.nim_cache[0].bucket, null)
+  value       = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].bucket : null
 }
 
 output "s3_output_bucket" {
@@ -122,7 +122,7 @@ output "eks_namespaces" {
 
 output "s3_model_assets_bucket" {
   description = "S3 bucket holding downloaded open-weight model files. Null when no open-weight endpoints exist."
-  value       = try(aws_s3_bucket.model_assets[0].bucket, null)
+  value       = local.any_weights_enabled ? aws_s3_bucket.model_assets[0].bucket : null
 }
 
 output "model_weights_s3_uris" {
@@ -130,11 +130,11 @@ output "model_weights_s3_uris" {
   value = merge(
     {
       for k in keys(var.sagemaker_endpoints.open_weight) :
-      "${k}-sm" => "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.open_weight_s3_prefix[k]}"
+      "${k}-sm" => "s3://${local.any_weights_enabled ? aws_s3_bucket.model_assets[0].bucket : ""}/${local.open_weight_s3_prefix[k]}"
     },
     {
       for k in keys(var.eks_deployments.open_weight) :
-      "${k}-eks" => "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.eks_open_weight_s3_prefix[k]}"
+      "${k}-eks" => "s3://${local.any_weights_enabled ? aws_s3_bucket.model_assets[0].bucket : ""}/${local.eks_open_weight_s3_prefix[k]}"
     }
   )
 }
@@ -143,6 +143,6 @@ output "model_profile_cache_uris" {
   description = "Map of endpoint key to S3 URI for the pre-cached NGC model profile (nim-cache/{image-name}-{version}/{instance-type}/). Endpoints sharing the same source_image_uri and instance_type point to the same URI. Null per-entry when enable_model_profile_cache = false. Empty when sagemaker_endpoints = {}."
   value = {
     for k, v in var.sagemaker_endpoints.nim :
-    k => v.enable_model_profile_cache ? "s3://${try(aws_s3_bucket.nim_cache[0].bucket, "")}/nim-cache/${local.uri_effective_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : null
+    k => v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_effective_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : null
   }
 }

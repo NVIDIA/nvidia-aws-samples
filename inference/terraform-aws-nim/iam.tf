@@ -53,7 +53,7 @@ data "aws_iam_policy_document" "sagemaker_inline" {
   # Model profile cache — read (sync down at startup) and write (cache-profiles CodeBuild).
   # Only added when any endpoint has enable_model_profile_cache = true (bucket may not exist otherwise).
   dynamic "statement" {
-    for_each = length(local.endpoints_with_cache) > 0 ? [1] : []
+    for_each = local.any_cache_enabled ? [1] : []
     content {
       sid = "S3CacheReadWrite"
       actions = [
@@ -210,7 +210,7 @@ data "aws_iam_policy_document" "codebuild_inline" {
   # Model profile cache bucket — CodeBuild writes; SageMaker launch.sh reads at startup.
   # Only added when any endpoint has enable_model_profile_cache = true.
   dynamic "statement" {
-    for_each = length(local.endpoints_with_cache) > 0 ? [1] : []
+    for_each = local.any_cache_enabled ? [1] : []
     content {
       sid = "S3CacheReadWrite"
       actions = [

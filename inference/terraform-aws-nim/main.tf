@@ -402,8 +402,8 @@ module "eks_infra" {
   public_subnet_ids       = each.value.public_subnet_ids
   instance_type           = each.value.instance_type
   kubernetes_version      = each.value.kubernetes_version
-  cache_bucket_arn        = try(aws_s3_bucket.nim_cache[0].arn, null)
-  enable_cache_iam        = length(local.endpoints_with_cache) > 0
+  cache_bucket_arn        = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].arn : null
+  enable_cache_iam        = local.any_cache_enabled
   endpoint_public_access  = each.value.endpoint_public_access
   endpoint_private_access = each.value.endpoint_private_access
   public_access_cidrs     = each.value.public_access_cidrs
@@ -450,7 +450,7 @@ module "eks_app_nim" {
   ngc_cb_env_type            = local.ngc_cb_env_type
   ngc_secret_arn             = try(var.ngc_credentials.secret_arn, null)
   enable_model_profile_cache = each.value.enable_model_profile_cache
-  cache_bucket               = try(aws_s3_bucket.nim_cache[0].bucket, null)
+  cache_bucket               = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].bucket : null
   cache_prefix               = local.eks_cache_prefix[each.key]
   nim_type                   = each.value.nim_type
   helm_chart_name            = local.eks_helm_chart_name[each.key]
@@ -503,7 +503,7 @@ module "eks_app_open_weight" {
   ecr_repository_url         = aws_ecr_repository.nim.repository_url
   ecr_image_tag              = null
   model_id                   = each.value.model_id
-  model_assets_bucket        = try(aws_s3_bucket.model_assets[0].bucket, null)
+  model_assets_bucket        = local.any_weights_enabled ? aws_s3_bucket.model_assets[0].bucket : null
   weights_s3_prefix          = local.eks_open_weight_s3_prefix[each.key]
   extra_args_str             = local.eks_extra_args_str[each.key]
   ngc_api_key                = local.ngc_api_key

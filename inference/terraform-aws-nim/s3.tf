@@ -17,7 +17,7 @@ resource "aws_s3_bucket" "codebuild" {
 # Shared between SageMaker (aws s3 sync at startup) and EKS (S3 Files CSI — Phase 3).
 # Only created when enable_model_profile_cache = true for at least one endpoint.
 resource "aws_s3_bucket" "nim_cache" {
-  count = length(local.endpoints_with_cache) > 0 ? 1 : 0
+  count = local.any_cache_enabled ? 1 : 0
 
   region        = var.region
   bucket        = "${local.name_prefix}-nim-cache-${random_id.suffix.hex}"
@@ -29,7 +29,7 @@ resource "aws_s3_bucket" "nim_cache" {
 }
 
 resource "aws_s3_bucket_versioning" "nim_cache" {
-  count = length(local.endpoints_with_cache) > 0 ? 1 : 0
+  count = local.any_cache_enabled ? 1 : 0
 
   region = var.region
   bucket = aws_s3_bucket.nim_cache[0].id
@@ -45,7 +45,7 @@ resource "aws_s3_bucket_versioning" "nim_cache" {
 # Handles orphaned prefixes from instance_type or endpoint key changes.
 # Null retention = no rule created (objects persist until manually deleted).
 resource "aws_s3_bucket_lifecycle_configuration" "nim_cache" {
-  count = length(local.endpoints_with_cache) > 0 && var.model_profile_cache_retention_days != null ? 1 : 0
+  count = local.any_cache_enabled && var.model_profile_cache_retention_days != null ? 1 : 0
 
   region = var.region
   bucket = aws_s3_bucket.nim_cache[0].id
@@ -75,7 +75,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "nim_cache" {
 # relying on AmazonSageMakerFullAccess wildcard condition (which requires "sagemaker" in name).
 # Only created when at least one open weight endpoint is configured.
 resource "aws_s3_bucket" "model_assets" {
-  count = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0 ? 1 : 0
+  count = local.any_weights_enabled ? 1 : 0
 
   region        = var.region
   bucket        = "${local.name_prefix}-model-assets-${random_id.suffix.hex}"
@@ -101,7 +101,7 @@ resource "aws_s3_bucket" "sagemaker_output" {
 # re-download of multi-GB open-weight artifacts by weight-fetch CodeBuild
 # could silently corrupt an already-working weights prefix.
 resource "aws_s3_bucket_versioning" "model_assets" {
-  count = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0 ? 1 : 0
+  count = local.any_weights_enabled ? 1 : 0
 
   region = var.region
   bucket = aws_s3_bucket.model_assets[0].id
@@ -124,7 +124,7 @@ resource "aws_s3_bucket_public_access_block" "codebuild" {
 }
 
 resource "aws_s3_bucket_public_access_block" "nim_cache" {
-  count = length(local.endpoints_with_cache) > 0 ? 1 : 0
+  count = local.any_cache_enabled ? 1 : 0
 
   region                  = var.region
   bucket                  = aws_s3_bucket.nim_cache[0].id
@@ -135,7 +135,7 @@ resource "aws_s3_bucket_public_access_block" "nim_cache" {
 }
 
 resource "aws_s3_bucket_public_access_block" "model_assets" {
-  count = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0 ? 1 : 0
+  count = local.any_weights_enabled ? 1 : 0
 
   region                  = var.region
   bucket                  = aws_s3_bucket.model_assets[0].id

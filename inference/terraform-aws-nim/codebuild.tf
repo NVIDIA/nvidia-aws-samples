@@ -199,7 +199,7 @@ resource "aws_codebuild_project" "weight_fetch" {
     }
     environment_variable {
       name  = "S3_BUCKET"
-      value = try(aws_s3_bucket.model_assets[0].bucket, "")
+      value = local.any_weights_enabled ? aws_s3_bucket.model_assets[0].bucket : ""
     }
     environment_variable {
       name  = "S3_PREFIX"
@@ -336,7 +336,7 @@ resource "aws_codebuild_project" "model_profile_cache" {
     }
     environment_variable {
       name  = "S3_BUCKET"
-      value = try(aws_s3_bucket.nim_cache[0].bucket, "")
+      value = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].bucket : ""
     }
     environment_variable {
       name  = "CACHE_PATH"

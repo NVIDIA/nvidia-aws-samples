@@ -49,6 +49,18 @@ locals {
     for k, v in var.sagemaker_endpoints.nim : k => v
     if v.enable_model_profile_cache
   }
+
+  # Bool for cache infrastructure gates (bucket / lifecycle / IAM). Includes
+  # EKS llm/embedding deployments so an EKS-only cluster with the flag on
+  # still provisions the nim_cache bucket + IAM.
+  any_cache_enabled = length(local.endpoints_with_cache) > 0 || anytrue([
+    for k, v in var.eks_deployments.nim :
+    v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)
+  ])
+
+  # Bool for model_assets bucket gate. True when any open-weight endpoint
+  # (SageMaker or EKS) is configured — that's when we need the weights bucket.
+  any_weights_enabled = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0
 }
 
 # --- Image URI parsing ---
@@ -209,9 +221,39 @@ locals {
     }
   )
 
+  # Normalized cache candidates from both platforms. SageMaker carries instance_type
+  # and model_profile on the deployment; EKS carries instance_type on the cluster
+  # and has no model_profile field. sync_to_ecr is SageMaker-only and defaults
+  # to true on EKS (all EKS NIM images are ECR-mirrored via base_sync).
+  cache_candidates = merge(
+    {
+      for k, v in local.endpoints_with_cache :
+      "sm/${k}" => {
+        source_image_uri = v.source_image_uri
+        instance_type    = v.instance_type
+        model_profile    = v.model_profile
+        sync_to_ecr      = v.sync_to_ecr
+        force_rebuild    = v.force_rebuild
+        debug            = v.debug
+      }
+    },
+    {
+      for k, v in var.eks_deployments.nim :
+      "eks/${k}" => {
+        source_image_uri = v.source_image_uri
+        instance_type    = var.eks_clusters[v.cluster_key].instance_type
+        model_profile    = null
+        sync_to_ecr      = true
+        force_rebuild    = v.force_rebuild
+        debug            = v.debug
+      }
+      if v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)
+    }
+  )
+
   cache_map = {
     for key, entries in {
-      for k, v in local.endpoints_with_cache :
+      for k, v in local.cache_candidates :
       "${replace(local.uri_effective_canonical[v.source_image_uri], ".", "-")}--${replace(replace(v.instance_type, "ml.", ""), ".", "-")}${v.model_profile != null ? "--${replace(v.model_profile, "_", "-")}" : ""}" => {
         source_image_uri  = v.source_image_uri
         instance_type     = replace(v.instance_type, "ml.", "")
@@ -668,7 +710,7 @@ locals {
   # Empty string when enable_vllm_recipe = false (launch.sh skips sourcing).
   recipe_env_s3_uri = {
     for k, v in var.sagemaker_endpoints.open_weight :
-    k => v.enable_vllm_recipe ? "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.open_weight_s3_prefix[k]}/recipe_${v.vllm_precision}.env" : null
+    k => v.enable_vllm_recipe && local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}/recipe_${v.vllm_precision}.env" : null
   }
 }
 
@@ -727,7 +769,7 @@ locals {
       HF_SECRET_ARN       = local.hf_secret_arn
       HF_SECRET_JSON_KEY  = local.hf_secret_json_key
       CACHE_PATH          = var.cache_path
-      MODEL_PROFILE_CACHE = v.enable_model_profile_cache ? "s3://${try(aws_s3_bucket.nim_cache[0].bucket, "")}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
+      MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
       ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
     }
   }
@@ -736,7 +778,7 @@ locals {
     for k, v in var.sagemaker_endpoints.open_weight : k => {
       NIM_CMD             = "vllm serve /opt/ml/model --port 8000 --served-model-name ${v.model_id}"
       NIM_HEALTH_PATH     = "/health"
-      OPEN_WEIGHTS_S3_URI = "s3://${try(aws_s3_bucket.model_assets[0].bucket, "")}/${local.open_weight_s3_prefix[k]}"
+      OPEN_WEIGHTS_S3_URI = local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}" : ""
       VLLM_USER_ARGS      = local.extra_args_str[k]
       RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
       ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]

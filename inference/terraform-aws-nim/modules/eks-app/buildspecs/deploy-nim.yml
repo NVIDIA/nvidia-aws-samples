@@ -94,18 +94,18 @@ phases:
     commands:
       - '[ "$LOAD_BALANCER_INTERNAL" = "true" ] && LB_SCHEME="internal" || LB_SCHEME="internet-facing"'
 
-      # Render loadBalancerSourceRanges YAML from NLB_ALLOWED_CIDR_BLOCKS (comma
-      # separated). Empty when unset — the field is omitted from Service specs.
-      # Indent = 2 spaces to match sibling of spec.type / service.type in the
-      # RENDERED YAML files (relative to spec:/service: at column 0). The buildspec's
-      # heredocs strip the 8-column YAML block indent before writing content.
+      # Render loadBalancerSourceRanges YAML. Baked-in indent (10 spaces on field,
+      # 12 on list items) makes each line correct after heredoc substitution —
+      # bash only applies the source-line prefix to the first line of a
+      # multi-line variable, so we cannot rely on source indent for lines 2+.
+      # Emitted on its own source line in each template.
       - |
         LB_SOURCE_RANGES_YAML=""
         if [ -n "${NLB_ALLOWED_CIDR_BLOCKS}" ]; then
-          LB_SOURCE_RANGES_YAML="  loadBalancerSourceRanges:"$'\n'
+          LB_SOURCE_RANGES_YAML="  loadBalancerSourceRanges:"
           IFS=',' read -ra CIDRS <<< "${NLB_ALLOWED_CIDR_BLOCKS}"
           for c in "${CIDRS[@]}"; do
-            LB_SOURCE_RANGES_YAML+="    - \"${c}\""$'\n'
+            LB_SOURCE_RANGES_YAML+=$'\n'"    - \"${c}\""
           done
         fi
 
@@ -219,7 +219,8 @@ phases:
             app: ${RELEASE_NAME}
           type: LoadBalancer
           loadBalancerClass: eks.amazonaws.com/nlb
-        ${LB_SOURCE_RANGES_YAML}  ports:
+        ${LB_SOURCE_RANGES_YAML}
+          ports:
             - name: http
               port: 8000
               targetPort: 8000
@@ -352,7 +353,8 @@ phases:
             app: ${RELEASE_NAME}
           type: LoadBalancer
           loadBalancerClass: eks.amazonaws.com/nlb
-        ${LB_SOURCE_RANGES_YAML}  ports:
+        ${LB_SOURCE_RANGES_YAML}
+          ports:
             - name: grpc
               port: ${PORT}
               targetPort: ${PORT}
@@ -422,7 +424,8 @@ phases:
           type: LoadBalancer
           port: ${PORT}
           loadBalancerClass: "eks.amazonaws.com/nlb"
-        ${LB_SOURCE_RANGES_YAML}  annotations:
+        ${LB_SOURCE_RANGES_YAML}
+          annotations:
             service.beta.kubernetes.io/aws-load-balancer-type: "external"
             service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
             service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
@@ -454,7 +457,8 @@ phases:
         service:
           type: LoadBalancer
           loadBalancerClass: "eks.amazonaws.com/nlb"
-        ${LB_SOURCE_RANGES_YAML}  annotations:
+        ${LB_SOURCE_RANGES_YAML}
+          annotations:
             service.beta.kubernetes.io/aws-load-balancer-type: "external"
             service.beta.kubernetes.io/aws-load-balancer-scheme: "${LB_SCHEME}"
             service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
@@ -554,6 +558,16 @@ phases:
             --wait \
             --timeout 90m \
             $HELM_FLAGS
+
+          # nim-llm chart doesn't expose service.loadBalancerSourceRanges, so
+          # the values-file entry rendered above is ignored on this path. Patch
+          # the Service directly so the LBC scopes the NLB SG to caller CIDRs.
+          if [ -n "${NLB_ALLOWED_CIDR_BLOCKS}" ]; then
+            IFS=',' read -ra _CIDRS <<< "${NLB_ALLOWED_CIDR_BLOCKS}"
+            _CIDR_JSON=$(printf '"%s",' "${_CIDRS[@]}" | sed 's/,$//')
+            _SVC=$(kubectl get svc -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].metadata.name}')
+            kubectl patch svc -n "$NAMESPACE" "$_SVC" --type=merge -p "{\"spec\":{\"loadBalancerSourceRanges\":[${_CIDR_JSON}]}}"
+          fi
 
           fi  # close PROTOCOL = "grpc" check
 
