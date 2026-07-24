@@ -402,8 +402,8 @@ module "eks_infra" {
   public_subnet_ids       = each.value.public_subnet_ids
   instance_type           = each.value.instance_type
   kubernetes_version      = each.value.kubernetes_version
-  cache_bucket_arn        = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].arn : null
-  enable_cache_iam        = local.any_cache_enabled
+  cache_bucket_arn        = local.cluster_has_cache[each.key] ? aws_s3_bucket.nim_cache[0].arn : null
+  enable_cache_iam        = local.cluster_has_cache[each.key]
   endpoint_public_access  = each.value.endpoint_public_access
   endpoint_private_access = each.value.endpoint_private_access
   public_access_cidrs     = each.value.public_access_cidrs
@@ -450,8 +450,8 @@ module "eks_app_nim" {
   ngc_cb_env_type            = local.ngc_cb_env_type
   ngc_secret_arn             = try(var.ngc_credentials.secret_arn, null)
   enable_model_profile_cache = each.value.enable_model_profile_cache
-  cache_bucket               = local.any_cache_enabled ? aws_s3_bucket.nim_cache[0].bucket : null
-  cache_prefix               = local.eks_cache_prefix[each.key]
+  cache_bucket               = each.value.enable_model_profile_cache ? aws_s3_bucket.nim_cache[0].bucket : null
+  cache_prefix               = each.value.enable_model_profile_cache ? local.eks_cache_prefix[each.key] : null
   nim_type                   = each.value.nim_type
   helm_chart_name            = local.eks_helm_chart_name[each.key]
   helm_chart_repo_url        = local.eks_helm_chart_repo_url[each.key]

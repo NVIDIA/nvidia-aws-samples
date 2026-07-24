@@ -163,23 +163,26 @@ if [ -n "${ADDITIONAL_SCRIPTS:-}" ]; then
     # would not terminate this parent launch.sh. Use a here-string via a tempfile
     # (POSIX-safe: no bash <<< or process substitution) and check each script's
     # exit code explicitly so a failure actually aborts container startup.
-    printf '%s\n' "$ADDITIONAL_SCRIPTS" > /tmp/additional_scripts.list
+    scripts_list=$(mktemp)
+    printf '%s\n' "$ADDITIONAL_SCRIPTS" > "$scripts_list"
     i=0
     while IFS= read -r uri; do
         [ -z "$uri" ] && continue
+        script_path=$(mktemp)
         echo "=== [$(date -u '+%H:%M:%S')] Running additional script [$i]: $uri ==="
-        if ! aws s3 cp "$uri" /tmp/additional_script_${i}.sh; then
+        if ! aws s3 cp "$uri" "$script_path"; then
             echo "ERROR: failed to download additional script [$i]: $uri — aborting startup"
             exit 1
         fi
-        chmod +x /tmp/additional_script_${i}.sh
-        if ! /tmp/additional_script_${i}.sh; then
+        chmod +x "$script_path"
+        if ! "$script_path"; then
             echo "ERROR: additional script [$i] exited non-zero: $uri — aborting startup"
             exit 1
         fi
+        rm -f "$script_path"
         i=$((i + 1))
-    done < /tmp/additional_scripts.list
-    rm -f /tmp/additional_scripts.list
+    done < "$scripts_list"
+    rm -f "$scripts_list"
 fi
 
 # Check if Caddy is already present

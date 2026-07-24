@@ -61,6 +61,17 @@ locals {
   # Bool for model_assets bucket gate. True when any open-weight endpoint
   # (SageMaker or EKS) is configured — that's when we need the weights bucket.
   any_weights_enabled = length(var.sagemaker_endpoints.open_weight) > 0 || length(var.eks_deployments.open_weight) > 0
+
+  # Per-cluster cache gate. True only for clusters that host at least one
+  # cache-enabled NIM deployment. Drives eks-infra cache IAM scoping so
+  # clusters running only cache-disabled deployments don't get bucket-read
+  # permissions they never use.
+  cluster_has_cache = {
+    for ck, _ in var.eks_clusters : ck => anytrue([
+      for dk, dv in var.eks_deployments.nim :
+      dv.cluster_key == ck && dv.enable_model_profile_cache && contains(["llm", "embedding"], dv.nim_type)
+    ])
+  }
 }
 
 # --- Image URI parsing ---
