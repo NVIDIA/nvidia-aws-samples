@@ -17,7 +17,10 @@ variable "ngc_api_key" {
   description = "NGC API key as a raw string (Path B — inline). When set, ngc_secret_name is ignored and the value flows into Terraform state. Use only for local dev / short-lived POCs; prefer Path A (secret_arn) for anything shared. Exactly one of ngc_secret_name / ngc_api_key must be set."
 
   validation {
-    condition     = (var.ngc_secret_name != null) != (var.ngc_api_key != null)
-    error_message = "Exactly one of ngc_secret_name (Path A, Secrets Manager) or ngc_api_key (Path B, inline) must be set — not both, not neither."
+    condition = (
+      (var.ngc_secret_name != null && trimspace(var.ngc_secret_name) != "")
+      != (var.ngc_api_key != null && trimspace(var.ngc_api_key) != "")
+    )
+    error_message = "Exactly one of ngc_secret_name (Path A, Secrets Manager) or ngc_api_key (Path B, inline) must be set to a non-empty value — not both, not neither."
   }
 }
