@@ -47,9 +47,9 @@ Samples are organized first by **use case**, then by the **AWS service** they ru
 |---|---|---|
 | [`inference/`](./inference) | Serving and running inference | Available |
 | [`agentic/`](./agentic) | Agentic workflows and tool-using applications | Available |
+| [`physical-ai/`](./physical-ai) | World foundation models, robotics, and simulation workloads | Available |
 | `training/` | Model training and fine-tuning | Planned |
 | `data-processing/` | Data curation and processing pipelines | Planned |
-| `physical-ai/` | Robotics and simulation workloads | Planned |
 | `industry-solutions/` | Industry-specific solutions | Planned |
 
 Within each use case, samples are grouped by AWS service. For example, under `inference/` you'll find `bedrock/` and `eks/`, each containing self-contained samples with their own README.
