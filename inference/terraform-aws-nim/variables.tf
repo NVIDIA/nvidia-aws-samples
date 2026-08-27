@@ -159,6 +159,7 @@ variable "sagemaker_endpoints" {
         nim_entrypoint     = optional(string, null)
         caddy_backend_port = optional(number, null)
         cuda_driver_label  = optional(string, null)
+        infer_path         = optional(string, null)
       }), {})
     })), {})
     open_weight = optional(map(object({
@@ -301,6 +302,10 @@ variable "sagemaker_endpoints" {
                                                         (standard NIMs expose 8000). Only set for
                                                         custom NIMs on a different port (e.g. 8001).
                                    cuda_driver_label  — CUDA version for SageMaker AMI selection.
+                                   infer_path         — Path Caddy rewrites POST /invocations to.
+                                                        Null = module default (/v1/chat/completions).
+                                                        Set for NIMs whose inference path isn't
+                                                        chat/completions (e.g. "/v1/infer" for Alpamayo).
 
                                    Example (custom NIM):
                                      shim_config = {
@@ -831,6 +836,7 @@ variable "shim_config" {
     nim_entrypoint     = optional(string, "/opt/nvidia/nvidia_entrypoint.sh")
     caddy_backend_port = optional(number, null)
     cuda_driver_label  = optional(string, null)
+    infer_path         = optional(string, "/v1/chat/completions")
   })
   default     = {}
   description = <<-EOD

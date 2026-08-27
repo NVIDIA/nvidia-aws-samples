@@ -782,6 +782,10 @@ locals {
       CACHE_PATH          = var.cache_path
       MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
       ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
+      # /invocations rewrite target for the shim. Per-endpoint override wins; otherwise the
+      # module-level default (/v1/chat/completions). Set shim_config.infer_path for NIMs with a
+      # non-chat inference path (e.g. Alpamayo → /v1/infer).
+      NIM_INFER_PATH = v.shim_config.infer_path != null ? v.shim_config.infer_path : var.shim_config.infer_path
     }
   }
 

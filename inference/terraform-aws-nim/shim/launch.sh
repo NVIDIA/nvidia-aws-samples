@@ -9,7 +9,8 @@
 #   5. Start NIM or vLLM, then monitor: if the inference process exits, kill Caddy and exit the
 #      container so SageMaker marks the endpoint Failed immediately instead of waiting out the timeout
 #
-# Framework path/health mapping is in caddy-config.json (controlled by NIM_HEALTH_PATH env var).
+# Framework path/health mapping is in caddy-config.json (controlled by NIM_INFER_PATH +
+# NIM_HEALTH_PATH env vars — /invocations rewrites to NIM_INFER_PATH, /ping to NIM_HEALTH_PATH).
 # Adding support for a new framework (e.g. Triton) means adding its paths to caddy-config.json
 # and passing the correct NIM_HEALTH_PATH from the SageMaker model environment variables.
 #
@@ -206,9 +207,10 @@ else
 fi
 
 HEALTH_PATH="${NIM_HEALTH_PATH:-/v1/health/ready}"
+INFER_PATH="${NIM_INFER_PATH:-/v1/chat/completions}"
 
 CONFIG_FILE=$(mktemp)
-cat "$CONFIG_FILE_PATH" | sed "s/\${PORT}/$PORT/g; s/\${BACKEND_PORT}/$BACKEND_PORT/g; s|\${HEALTH_PATH}|$HEALTH_PATH|g" > $CONFIG_FILE
+cat "$CONFIG_FILE_PATH" | sed "s/\${PORT}/$PORT/g; s/\${BACKEND_PORT}/$BACKEND_PORT/g; s|\${HEALTH_PATH}|$HEALTH_PATH|g; s|\${INFER_PATH}|$INFER_PATH|g" > $CONFIG_FILE
 
 if [ ! -s "$CONFIG_FILE" ]; then
   echo "Configuration file is empty or not created properly"
