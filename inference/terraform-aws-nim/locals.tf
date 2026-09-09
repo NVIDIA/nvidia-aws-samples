@@ -331,6 +331,23 @@ locals {
     # p5e/p5en — H200
     "p5e.48xlarge"  = 8
     "p5en.48xlarge" = 8
+    # p6 — B200 / GB200 (Blackwell)
+    "p6-b200.48xlarge"   = 8
+    "p6e-gb200.36xlarge" = 8
+    # g7 — RTX PRO 4500 Blackwell 32 GB
+    "g7.2xlarge"  = 1
+    "g7.4xlarge"  = 1
+    "g7.8xlarge"  = 1
+    "g7.12xlarge" = 2
+    "g7.24xlarge" = 4
+    "g7.48xlarge" = 8
+    # g7e — RTX PRO 6000 Blackwell 96 GB
+    "g7e.2xlarge"  = 1
+    "g7e.4xlarge"  = 1
+    "g7e.8xlarge"  = 1
+    "g7e.12xlarge" = 2
+    "g7e.24xlarge" = 4
+    "g7e.48xlarge" = 8
   }
 
   # Per-deployment resolved GPU count — kept separate per path so NIM and open-weight
@@ -772,7 +789,9 @@ locals {
   # never appears in the Model's ContainerDefinition.Environment (visible via
   # sagemaker:DescribeModel) or in Terraform state.
   nim_model_env = {
-    for k, v in var.sagemaker_endpoints.nim : k => {
+    for k, v in var.sagemaker_endpoints.nim : k => merge(v.env, {
+      # Reserved keys below win over v.environment so callers can't clobber
+      # credentials or the shim's infer path.
       NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
       NGC_SECRET_ARN      = local.ngc_secret_arn
       NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
@@ -786,7 +805,7 @@ locals {
       # module-level default (/v1/chat/completions). Set shim_config.infer_path for NIMs with a
       # non-chat inference path (e.g. Alpamayo → /v1/infer).
       NIM_INFER_PATH = v.shim_config.infer_path != null ? v.shim_config.infer_path : var.shim_config.infer_path
-    }
+    })
   }
 
   open_weight_model_env = {

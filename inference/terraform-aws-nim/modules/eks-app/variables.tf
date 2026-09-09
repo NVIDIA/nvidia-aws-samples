@@ -190,6 +190,18 @@ variable "helm_values_override" {
   description = "Raw YAML string merged after the generated nim-values.yaml. Applied with a second -f flag so any key here wins over the generated defaults. Use to supply chart-specific fields the module doesn't generate (e.g. Riva model configs, custom resource limits)."
 }
 
+variable "manifest_patch" {
+  type        = string
+  default     = null
+  description = "Raw YAML string applied as a strategic-merge patch over the generated raw-manifest Deployment (no-chart path only). Parity with helm_values_override for the raw-kubectl deploy method. Ignored on the Helm path."
+}
+
+variable "env" {
+  type        = map(string)
+  default     = {}
+  description = "Extra container environment variables merged into the NIM container (raw-manifest path). E.g. { NIM_MODEL_TYPE = \"generator\" } for a unified NIM whose mode is env-selected. Reserved keys (NGC_API_KEY) are not overridable."
+}
+
 variable "gpu_count" {
   type        = number
   default     = 1

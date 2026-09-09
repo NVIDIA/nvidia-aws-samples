@@ -51,6 +51,19 @@ resource "terraform_data" "validation" {
       error_message = "One or more eks_deployments entries set `autoscaling` but their target cluster does not have `enable_autoscaling = true`. Enable autoscaling on the cluster first."
     }
 
+    # gpu_count (explicit or auto-derived) must not exceed the GPUs the cluster's
+    # instance_type physically has — otherwise the pod is unschedulable and hangs
+    # Pending forever. Only checked for instance types in the known GPU-count table
+    # (unknown types fall back to 1 and can't be validated). Fails fast at apply.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        !contains(keys(local.instance_gpu_count), var.eks_clusters[v.cluster_key].instance_type)
+        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type]
+      ])
+      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its cluster's instance_type provides. Reduce gpu_count, or pick an instance_type with more GPUs."
+    }
+
     # Future PR: restore enable_asset_build precondition when re-enabling custom build path.
   }
 }
@@ -458,6 +471,8 @@ module "eks_app_nim" {
   helm_chart_version         = each.value.helm_chart_version
   helm_chart_s3_uri          = each.value.helm_chart_s3_uri
   helm_values_override       = each.value.helm_values_override
+  manifest_patch             = each.value.manifest_patch
+  env                        = each.value.env
   gpu_count                  = local.eks_nim_gpu_count[each.key]
   replicas                   = each.value.replicas
   namespace                  = coalesce(each.value.namespace, each.key)

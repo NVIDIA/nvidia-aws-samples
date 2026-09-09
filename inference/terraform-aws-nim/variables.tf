@@ -154,6 +154,7 @@ variable "sagemaker_endpoints" {
       debug                      = optional(bool, false)
       force_rebuild              = optional(bool, false)
       additional_scripts         = optional(list(object({ source = string })), [])
+      env                        = optional(map(string), {})
       shim_config = optional(object({
         nim_cmd            = optional(string, null)
         nim_entrypoint     = optional(string, null)
@@ -548,6 +549,8 @@ variable "eks_deployments" {
       helm_chart_version         = optional(string, null)
       helm_chart_s3_uri          = optional(string, null)
       helm_values_override       = optional(string, null)
+      manifest_patch             = optional(string, null)
+      env                        = optional(map(string), {})
       gpu_count                  = optional(number, null)
       replicas                   = optional(number, 1)
       namespace                  = optional(string, null)
@@ -773,15 +776,11 @@ variable "eks_deployments" {
     error_message = "eks_deployments.nim: nim_type must be one of: \"llm\", \"vlm\", \"embedding\", \"reranking\", \"speech\", \"custom\"."
   }
 
-  validation {
-    condition = alltrue([
-      for k, v in var.eks_deployments.nim :
-      v.nim_type != "custom" || v.protocol == "grpc" || (
-        v.helm_chart_s3_uri != null || (v.helm_chart_name != null && v.helm_chart_repo_url != null)
-      )
-    ])
-    error_message = "eks_deployments.nim: nim_type = \"custom\" with protocol = \"http\" requires helm_chart_s3_uri OR both helm_chart_name and helm_chart_repo_url. (protocol = \"grpc\" bypasses Helm — chart info not required.)"
-  }
+  # Deploy-method selection for nim_type = "custom" (no chart auto-derived):
+  #   - a chart supplied (helm_chart_s3_uri OR name+repo) → Helm
+  #   - no chart → raw kubectl Deployment+Service, probes chosen by `protocol`
+  #     (grpc | http). This is how no-chart NIMs (SVD gRPC, Cosmos HTTP) deploy.
+  # No validation needed: both "chart" and "no chart" are valid for custom.
 
   validation {
     condition = alltrue([

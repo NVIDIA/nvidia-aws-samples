@@ -200,6 +200,16 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = var.helm_values_override != null ? var.helm_values_override : ""
     }
     environment_variable {
+      name  = "MANIFEST_PATCH"
+      value = var.manifest_patch != null ? var.manifest_patch : ""
+    }
+    environment_variable {
+      # Newline-separated KEY=VALUE; the raw-manifest path emits each as a
+      # container env entry. Empty when no extra env is set.
+      name  = "EXTRA_ENV"
+      value = join("\n", [for k, v in var.env : "${k}=${v}"])
+    }
+    environment_variable {
       name  = "GPU_COUNT"
       value = tostring(var.gpu_count)
     }
@@ -311,6 +321,8 @@ resource "terraform_data" "deploy_trigger" {
       helm_chart_version         = var.helm_chart_version != null ? var.helm_chart_version : ""
       helm_chart_s3_uri          = var.helm_chart_s3_uri != null ? var.helm_chart_s3_uri : ""
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
+      manifest_patch             = var.manifest_patch != null ? var.manifest_patch : ""
+      env                        = join("\n", [for k, v in var.env : "${k}=${v}"])
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas
       load_balancer_internal     = var.load_balancer_internal

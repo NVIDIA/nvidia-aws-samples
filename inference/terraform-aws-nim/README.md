@@ -40,7 +40,8 @@ identical underlying hardware, different prefix.
 | [G4dn](https://aws.amazon.com/ec2/instance-types/g4/)       | NVIDIA T4           | 16 GB    | 1×, 4×, 8× | No             |
 | [G5](https://aws.amazon.com/ec2/instance-types/g5/)         | NVIDIA A10G         | 24 GB    | 1×, 4×, 8× | No             |
 | [G6](https://aws.amazon.com/ec2/instance-types/g6/)         | NVIDIA L4           | 24 GB    | 1×, 4×, 8× | No             |
-| [G6e](https://aws.amazon.com/ec2/instance-types/g6e/)       | NVIDIA L40S         | 48 GB    | 1×, 4×, 8× | No             |
+| [G6e](https://aws.amazon.com/ec2/instance-types/g6e/)       | NVIDIA L40S         | 48 GB    | 1×, 4×, 8×    | No             |
+| [G7e](https://aws.amazon.com/ec2/instance-types/g7e/)       | NVIDIA RTX PRO 6000 Blackwell | 96 GB | 1×, 2×, 4×, 8× | No           |
 | [P4d](https://aws.amazon.com/ec2/instance-types/p4/)        | NVIDIA A100 (HBM2)  | 40 GB    | 8× only    | Yes (NVSwitch) |
 | [P4de](https://aws.amazon.com/ec2/instance-types/p4/)       | NVIDIA A100 (HBM2e) | 80 GB    | 8× only    | Yes (NVSwitch) |
 | [P5](https://aws.amazon.com/ec2/instance-types/p5/)         | NVIDIA H100 (HBM3)  | 80 GB    | 1×, 8×     | Yes (NVLink 4) |
@@ -52,8 +53,15 @@ traffic; P-family instances use NVSwitch — roughly 10× higher bandwidth.
 
 ### Sizing tip
 
-Within the G-family, the `xlarge` through `8xlarge` sizes are all **1 GPU** — only host CPU /
-RAM scale up. You jump to **4 GPUs at `12xlarge`** and **8 GPUs at `48xlarge`**.
+For most G-family instances (G4dn/G5/G6/G6e), the `xlarge` through `8xlarge` sizes are all
+**1 GPU** — only host CPU / RAM scale up — then **4 GPUs at `12xlarge`** and **8 GPUs at
+`48xlarge`**.
+
+**G7e (RTX PRO 6000 Blackwell) uses a different ladder:** `2xlarge`/`4xlarge`/`8xlarge` are
+**1 GPU**, `12xlarge` is **2 GPUs**, `24xlarge` is **4 GPUs**, `48xlarge` is **8 GPUs** (there
+is no `g7e.xlarge`). At 96 GB/GPU, a single `g7e.2xlarge` clears the ~79 GiB/device floor of
+large world/video models (e.g. Cosmos 3 Generator nano) that no other single-GPU G instance
+can meet.
 
 Pick by deployment count, not just model size:
 
@@ -239,6 +247,28 @@ sagemaker_endpoints = {
   }
 }
 ```
+
+### Output transport — inline vs S3
+
+A NIM returns its output **in the response**, not to a file or bucket it manages — the
+container is stateless and has no access to your S3 or filesystem. How a large output (a
+generated video, a batch of frames) leaves the system depends on the endpoint type:
+
+- **EKS (HTTP/gRPC) and SageMaker realtime** return the output **inline**. HTTP NIMs
+  base64-encode it into the JSON body (e.g. a video as `b64_video` — ~33% size inflation);
+  gRPC NIMs return raw bytes in the response message. Simple, but the whole payload is
+  buffered in memory on both ends, and there's a ceiling: SageMaker realtime caps at **6 MB /
+  60 s**, and a multi-tens-of-MB HTTP body gets unwieldy.
+- **SageMaker async** (`endpoint_type = "async"`) is how you get an **S3-backed** output. You
+  POST an S3 input location; SageMaker runs the job, captures the NIM's inline response, and
+  writes it to an S3 `OutputLocation`, returning you the URI. The NIM still only emits inline
+  bytes — async is the layer that persists them to S3, with no 6 MB / 60 s cap.
+
+> You **cannot** make the NIM itself write to a mounted volume or bucket — a mounted PVC has
+> nothing to receive, because the NIM emits its output in the response body. For S3-backed
+> large outputs, use `endpoint_type = "async"`, or a client/gateway that decodes the inline
+> response and uploads it. See [Invoking endpoints](#invoking-endpoints) for the realtime,
+> async, and EKS invoke commands.
 
 ---
 
