@@ -1098,6 +1098,66 @@ curl http://<nlb-hostname>:8000/v1/chat/completions \
 
 ---
 
+## Capacity, failures, and retries
+
+GPU capacity — especially newer SKUs like G7e (RTX PRO 6000), P5 (H100), and P5e/P5en
+(H200) — is scarce, and the two deployment targets handle a capacity shortage very
+differently. This matters when choosing a path for scarce-GPU inference.
+
+### EKS degrades gracefully
+
+Kubernetes is a **reconciliation loop**. If no GPU capacity is available, the pod simply
+stays `Pending` and Karpenter keeps searching across the cluster's AZs; the moment capacity
+appears, the pod schedules. `terraform apply` still **succeeds** (the manifests applied
+fine — the pod comes up on its own afterward), and there is **no failed resource, no orphan,
+and no manual cleanup**. This is why EKS is the more robust target for scarce-GPU inference.
+
+### SageMaker endpoints fail hard, and the failure can block a retry
+
+A SageMaker endpoint is a **one-shot create**: `CreateEndpoint` either succeeds or fails
+permanently. On a capacity shortage it holds the create for up to the health-check timeout
+(default 3600s) and then marks the endpoint **`Failed`**. Two consequences:
+
+1. **The `apply` fails** (unlike EKS, where it succeeds and self-heals).
+2. **SageMaker leaves the `Failed` endpoint in place** (it keeps `FailureReason` for
+   debugging). Because the endpoint name is deterministic (it must be — the module
+   pre-creates the endpoint's CloudWatch log group by that name, and clients invoke it), the
+   **next `apply` collides**:
+
+   ```
+   ValidationException: Cannot create already existing endpoint "<name>"
+   ```
+
+   This is an upstream gap, not a module bug — SageMaker doesn't clean up the `Failed`
+   endpoint, and the Terraform AWS provider doesn't recover from it
+   ([hashicorp/terraform-provider-aws#40080](https://github.com/hashicorp/terraform-provider-aws/issues/40080),
+   [#43193](https://github.com/hashicorp/terraform-provider-aws/issues/43193),
+   [#27265](https://github.com/hashicorp/terraform-provider-aws/issues/27265)). The same
+   pattern can strand a model/endpoint-config if an apply is interrupted (e.g. an SSO/network
+   blip) mid-create.
+
+**Recovery — delete the `Failed` endpoint, then re-apply:**
+
+```bash
+# a Failed endpoint has no running instances, so this is free and safe
+aws sagemaker delete-endpoint --region <region> --endpoint-name <name>
+terraform apply
+```
+
+If capacity is available on the retry, it provisions and reaches `InService`. If not, it
+`Failed`s again — that's AWS not having the instance, and no code changes here can conjure
+capacity. For scarce Hopper/Blackwell SKUs, secure capacity first (Capacity Blocks for ML or
+a Capacity Reservation) or use the EKS path, which tolerates the shortage gracefully.
+
+> **Why the module doesn't auto-work-around this:** the only clean, declarative fix (omit
+> the endpoint `name` so the provider generates a fresh one per create) conflicts with the
+> pre-created log group, which needs the name at plan time; the alternative (`local-exec`
+> cleanup) is imperative and non-portable. Since a fix in either SageMaker or the provider
+> resolves it wholesale, the module documents the one-line recovery rather than carrying a
+> brittle workaround.
+
+---
+
 ## Troubleshooting
 
 ### Endpoint reaches `Failed` — container startup timeout
