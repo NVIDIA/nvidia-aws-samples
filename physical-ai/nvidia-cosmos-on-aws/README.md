@@ -243,10 +243,17 @@ curl -X POST "http://$LB:8000/v1/infer" \
 
 # Decode the inline base64 video → local MP4
 jq -r '.b64_video' out.json | base64 -d > cosmos_test.mp4
-open cosmos_test.mp4   # macOS; use your player elsewhere
 ```
 
 Response shape: `{ "b64_video": "<base64 MP4>", "seed": 42, ... }`.
+
+> **Output format — the video is VP9, not H.264.** Cosmos returns a **VP9-in-MP4**
+> clip (validated: `1280×720`, `24 fps`, ~8 s / 189 frames for the default params).
+> **macOS QuickTime can't play VP9** and will say "not compatible" — the file is fine.
+> Play it in **VLC** or **Chrome**, or transcode to H.264:
+> ```bash
+> ffmpeg -i cosmos_test.mp4 -c:v libx264 -pix_fmt yuv420p cosmos_h264.mp4
+> ```
 
 **`model_mode` values accepted by `/v1/infer`** (per the cosmos-cookbook API
 reference — we validated `text2video` only; which modes a given tower/variant serves
