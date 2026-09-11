@@ -789,36 +789,48 @@ locals {
   # never appears in the Model's ContainerDefinition.Environment (visible via
   # sagemaker:DescribeModel) or in Terraform state.
   nim_model_env = {
-    for k, v in var.sagemaker_endpoints.nim : k => merge(v.env, {
-      # Reserved keys below win over v.environment so callers can't clobber
-      # credentials or the shim's infer path.
-      NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
-      NGC_SECRET_ARN      = local.ngc_secret_arn
-      NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
-      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
-      HF_SECRET_ARN       = local.hf_secret_arn
-      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
-      CACHE_PATH          = var.cache_path
-      MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
-      ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
-      # /invocations rewrite target for the shim. Per-endpoint override wins; otherwise the
-      # module-level default (/v1/chat/completions). Set shim_config.infer_path for NIMs with a
-      # non-chat inference path (e.g. Alpamayo → /v1/infer).
-      NIM_INFER_PATH = v.shim_config.infer_path != null ? v.shim_config.infer_path : var.shim_config.infer_path
-    })
+    # Drop null/empty values before they reach primary_container.environment.
+    # SageMaker/AWS strips empty env keys on create, so any null/"" left here makes
+    # the stored environment differ from the desired map on the next plan — which
+    # forces the model to be replaced on every re-apply. And because the content
+    # suffix keeper is this same map, the name doesn't rotate, so create_before_destroy
+    # then hits "Cannot create already existing model". Compacting keeps desired == stored.
+    for k, v in var.sagemaker_endpoints.nim : k => {
+      for ek, ev in merge(v.env, {
+        # Reserved keys below win over v.env so callers can't clobber
+        # credentials or the shim's infer path.
+        NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
+        NGC_SECRET_ARN      = local.ngc_secret_arn
+        NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
+        HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+        HF_SECRET_ARN       = local.hf_secret_arn
+        HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+        CACHE_PATH          = var.cache_path
+        MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
+        ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
+        # /invocations rewrite target for the shim. Per-endpoint override wins; otherwise the
+        # module-level default (/v1/chat/completions). Set shim_config.infer_path for NIMs with a
+        # non-chat inference path (e.g. Alpamayo → /v1/infer).
+        NIM_INFER_PATH = v.shim_config.infer_path != null ? v.shim_config.infer_path : var.shim_config.infer_path
+      }) : ek => ev if ev != null && ev != ""
+    }
   }
 
   open_weight_model_env = {
+    # Compact null/empty values — see nim_model_env above for why (otherwise the
+    # model's environment perpetually diffs and forces replacement on re-apply).
     for k, v in var.sagemaker_endpoints.open_weight : k => {
-      NIM_CMD             = "vllm serve /opt/ml/model --port 8000 --served-model-name ${v.model_id}"
-      NIM_HEALTH_PATH     = "/health"
-      OPEN_WEIGHTS_S3_URI = local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}" : ""
-      VLLM_USER_ARGS      = local.extra_args_str[k]
-      RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
-      ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]
-      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
-      HF_SECRET_ARN       = local.hf_secret_arn
-      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+      for ek, ev in {
+        NIM_CMD             = "vllm serve /opt/ml/model --port 8000 --served-model-name ${v.model_id}"
+        NIM_HEALTH_PATH     = "/health"
+        OPEN_WEIGHTS_S3_URI = local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}" : ""
+        VLLM_USER_ARGS      = local.extra_args_str[k]
+        RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
+        ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]
+        HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+        HF_SECRET_ARN       = local.hf_secret_arn
+        HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+      } : ek => ev if ev != null && ev != ""
     }
   }
 }

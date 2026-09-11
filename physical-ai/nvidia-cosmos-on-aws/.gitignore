@@ -24,4 +24,6 @@ override.tf.json
 *.csv
 sample_data/
 out.json
+out_sm.json
 openapi.json
+req.json
