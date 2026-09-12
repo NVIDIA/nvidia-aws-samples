@@ -42,25 +42,15 @@ module "terraform-aws-nim" {
       private_subnet_ids = aws_subnet.private[*].id
       public_subnet_ids  = aws_subnet.public[*].id
 
-      # Cosmos 3 Generator requires Hopper or newer (CC >= 9.0) and, per NVIDIA's
-      # support matrix, >= 79 GiB VRAM per device for the Generator/nano tier. That
-      # rules out every older G-series (T4/L4/L40S, < 79 GB) and A100 80GB (Ampere
-      # CC 8.0) — an architecture floor, not just a memory floor.
-      #
-      # g7e.2xlarge (1× RTX PRO 6000 Blackwell Server Edition, 96 GB) is the default:
-      #   * The RTX PRO 6000 Blackwell is explicitly listed as a validated Cosmos 3
-      #     SKU, and its 96 GB clears the >= 79 GiB nano floor on a SINGLE GPU
-      #     (gpu_count = 1) — so no tensor-parallel needed for nano.
-      #   * Smallest/cheapest single-GPU AWS option that clears the floor — far
-      #     below an 8× H100 p5.48xlarge (~$98/hr).
-      #
-      # Upgrade paths (only if you move to the Generator/super 32B tier, which needs
-      # >= 121-150 GiB/device → multi-GPU tensor-parallel):
-      #   g7e.12xlarge / .24xlarge / .48xlarge — 2 / 4 / 8× RTX PRO 6000 (set gpu_count)
-      #   p5 / p5e / p5en                      — 8× H100 / H200
-      #
-      # See the README "Instance selection" section.
-      instance_type = "g7e.2xlarge"
+      # node_pool: the cluster's GPU allow-list. Cosmos 3 Generator needs Hopper+
+      # (CC >= 9.0) AND >= 79 GiB/device for nano — an architecture floor, not just
+      # memory (so VRAM alone isn't enough: A100 80GB has the memory but is Ampere
+      # and unsupported). We pin the g7e family (RTX PRO 6000 Blackwell, 96 GB), an
+      # explicitly-validated Cosmos 3 SKU and the cheapest single-GPU option that
+      # clears the floor. Karpenter picks whichever g7e SIZE has capacity, across AZs.
+      #   Generator/super (32B, >= 121-150 GiB/device) → set gpu_count > 1 for TP, or
+      #   add p5/p5e families. See the README "Instance selection" section.
+      node_pool = { instance_families = ["g7e"] }
 
       endpoint_public_access  = true
       endpoint_private_access = true
@@ -85,8 +75,9 @@ module "terraform-aws-nim" {
   #   for gRPC, here with HTTP probes. Leave all helm_chart_* unset → raw manifest.
   #
   # Why protocol = "http":
-  #   Cosmos serves REST on port 8000 (POST /v1/infer, GET /v1/health/*). One image
-  #   serves both towers; NIM_MODEL_TYPE (env) selects generator vs reasoner.
+  #   Cosmos serves REST on port 8000 (POST /v1/infer, GET /v1/health/*). The cosmos3
+  #   image is the GENERATOR (video). The standalone Reasoner is a SEPARATE NIM image
+  #   (nvcr.io/nim/nvidia/cosmos3-reasoner, /v1/chat/completions) — not an env switch.
   eks_deployments = {
     nim = {
       cosmos3 = {
@@ -96,13 +87,15 @@ module "terraform-aws-nim" {
         nim_type  = "custom" # no auto chart
         protocol  = "http"   # → raw manifest with httpGet probes (no chart supplied)
         port      = 8000
-        gpu_count = 1 # Generator Nano fits a single RTX PRO 6000 (96 GB) on g7e.2xlarge
+        gpu_count = 1 # Generator nano fits one RTX PRO 6000 (96 GB)
 
-        # Cosmos 3 is one image; these select the Generator tower (nano tier).
-        env = {
-          NIM_MODEL_TYPE    = "generator"
-          NIM_MODEL_VARIANT = "nano"
-        }
+        # This NIM needs >= 79 GiB VRAM (Generator nano). Within the cluster's g7e
+        # family that's the 96 GB RTX PRO 6000; Karpenter provisions the cheapest g7e
+        # size with capacity that satisfies it. (Set instance_types to pin exactly.)
+        node_selection = { min_gpu_memory_gib = 79 }
+
+        # NIM_MODEL_SIZE selects the size (nano 8B / super 32B) within the cosmos3 image.
+        env = { NIM_MODEL_SIZE = "nano" }
 
         # Restrict the internet-facing NLB to the deployer's IP. The internet-facing
         # NLB otherwise accepts 0.0.0.0/0 — see the module README "Networking /
