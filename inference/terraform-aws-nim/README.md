@@ -1100,11 +1100,13 @@ curl http://<nlb-hostname>:8000/v1/chat/completions \
 
 ## GPU node selection
 
-You don't pick an EC2 instance type — you declare what a model *needs* (GPU family and/or
-VRAM), and **EKS Auto Mode (managed Karpenter)** provisions the cheapest available instance
-that satisfies it, across GPU families and Availability Zones. This directly attacks GPU
-scarcity: instead of "deployment failed — no `g6e.2xlarge` capacity," you get "found and
-launched the cheapest node that fits."
+You can pin an exact EC2 instance type (`instance_types`) — but you don't *have* to, and
+that's the quality-of-life win. Instead you can declare what a model *needs* (GPU family
+and/or VRAM), and **EKS Auto Mode (managed Karpenter)** provisions the cheapest available
+instance that satisfies it, across GPU families and Availability Zones. This directly attacks
+GPU scarcity: instead of "deployment failed — no `g6e.2xlarge` capacity," you get "found and
+launched the cheapest node that fits." Pin when you want exact control; declare needs when you
+want resilience.
 
 Two levels:
 - **`eks_clusters[*].node_pool`** — the cluster's Karpenter **allow-list** (the substrate Karpenter may launch from).
@@ -1369,6 +1371,29 @@ the module — see DEVELOPER_REFERENCE.md).
 ---
 
 ## Architecture
+
+### What one `terraform apply` orchestrates
+
+Three pieces make the single-command deploy work: **Terraform actions** fire the builds,
+**CodeBuild** does the image/weight/deploy work, and **EKS Auto Mode (managed Karpenter)**
+provisions the right GPU nodes on demand — you never install or operate an autoscaler.
+
+```mermaid
+flowchart TB
+  A["terraform apply"]
+  A --> B["Terraform actions (terraform_data triggers)"]
+  A --> C["EKS Auto Mode cluster<br/>(AWS-managed Karpenter)"]
+  B --> D["CodeBuild: base-sync → ECR · shim build · kubectl apply"]
+  C --> E["GPU NodePool + NodeClass applied (from node_pool)"]
+  D --> F["NIM Deployment + Service"]
+  F --> G["pods Pending<br/>(gpu_count request + nodeAffinity from node_selection)"]
+  E --> H["managed Karpenter watches pending pods"]
+  G --> H
+  H --> I["launches cheapest instance meeting<br/>VRAM / family / reservation, across AZs"]
+  I --> J["pod Running → NLB serves the endpoint"]
+```
+
+The build-pipeline detail:
 
 ```
                         ┌─────────────────────────────────────────────┐

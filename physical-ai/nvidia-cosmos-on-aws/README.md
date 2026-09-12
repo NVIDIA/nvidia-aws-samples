@@ -61,26 +61,26 @@ Reasoner). See [Measured performance](#measured-performance).
 ## Two levers: deploy-time vs invoke-time
 
 A common point of confusion (especially coming from LLMs, where there's one knob).
-Cosmos has **two** levers at **two** layers:
+The Cosmos 3 **generator** has two levers at two layers:
 
 | Lever | Set where | Set when | Selects |
 |-------|-----------|----------|---------|
-| `NIM_MODEL_TYPE` (`generator`/`reasoner`), `NIM_MODEL_VARIANT` (`nano`/`super`) | **env var** (module's `env` passthrough) | **deploy time** | which tower/model loads into VRAM |
+| `NIM_MODEL_SIZE` (`nano` 8B / `super` 32B) | **env var** (module's `env` passthrough) | **deploy time** | which model size loads into VRAM |
 | `model_mode` (`text2video`, `image2video`, …) | **request JSON field** | **invoke time** | which operation this one call runs |
 
-**Consequence:** you do **not** redeploy to switch modes. One `generator`
-deployment exposes all the `/v1/infer` model_modes — you just change the request
-field. You only redeploy to switch **generator ↔ reasoner** (different tower, and
-the reasoner answers on `/v1/chat/completions`, a different endpoint).
+**Consequence:** you do **not** redeploy to switch modes. One generator deployment
+exposes all the `/v1/infer` model_modes — you just change the request field.
 
-This sample sets the deploy-time levers in
+**The reasoner is a *separate deployment*, not a lever.** Standalone reasoning (text /
+scoring via `/v1/chat/completions`) is a **different NIM image**
+(`nvcr.io/nim/nvidia/cosmos3-reasoner`) — not an env switch on the generator image. See
+[How the towers map to NIMs](#how-the-towers-map-to-nims-you-deploy-one-for-video).
+
+This sample sets the deploy-time size in
 [`examples/eks/nim/main.tf`](examples/eks/nim/main.tf):
 
 ```hcl
-env = {
-  NIM_MODEL_TYPE    = "generator"
-  NIM_MODEL_VARIANT = "nano"
-}
+env = { NIM_MODEL_SIZE = "nano" }
 ```
 
 ---
@@ -145,7 +145,7 @@ a **minimum per-device VRAM** — an architecture floor, not just a memory floor
 | Generator / super (32B) | ≥ 121 GiB (FP8) · ≥ 150 GiB (BF16) · ≥ 131 GiB (NVFP4) | ❌ needs multi-GPU tensor-parallel |
 
 NVIDIA explicitly lists **RTX PRO 6000 Blackwell Server Edition (96 GB)** as a
-validated Cosmos 3 SKU — that's the GPU in **`g7e.2xlarge`**, this sample's default:
+validated Cosmos 3 SKU — that's the GPU in the **`g7e`** family this sample targets:
 
 | AWS instance | GPU | Cosmos 3 nano? | Why |
 |--------------|-----|----------------|-----|
@@ -157,6 +157,25 @@ validated Cosmos 3 SKU — that's the GPU in **`g7e.2xlarge`**, this sample's de
 
 > **Precision:** the RTX PRO 6000 is Blackwell, so it supports **BF16, FP8, and
 > NVFP4** (NVFP4 requires Blackwell, CC ≥ 10.0). Nano supports all three.
+
+### How the sample expresses this
+
+Rather than pinning an exact instance type, the sample declares the *requirement* and lets
+EKS Auto Mode (managed Karpenter) pick the cheapest `g7e` size with capacity, across AZs:
+
+```hcl
+eks_clusters    = { cosmos = { node_pool = { instance_families = ["g7e"] } } }         # allow-list
+eks_deployments = { nim = { cosmos3 = { node_selection = { min_gpu_memory_gib = 79 } } } } # the need
+```
+
+Pin exactly instead with `node_selection = { instance_types = ["g7e.2xlarge"] }`. For the
+super (32B) tier, add larger `g7e` sizes / `p5` families and set `gpu_count > 1` (tensor-
+parallel). See the module README's [GPU node selection](../../inference/terraform-aws-nim/README.md#gpu-node-selection)
+for the full knob set (VRAM band, denylist, capacity reservations, cost caps).
+
+**Reasoner sizing** (separate `cosmos3-reasoner` NIM): the ~8B VLM runs on an **L40S (48 GB,
+FP8)** — much cheaper than the generator. On EKS use `node_selection = { instance_families =
+["g6e"] }`; on SageMaker, `ml.g6e.2xlarge`.
 
 ---
 
