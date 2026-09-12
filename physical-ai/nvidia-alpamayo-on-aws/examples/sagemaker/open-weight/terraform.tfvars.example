@@ -1,7 +1,0 @@
-# Copy this file to terraform.tfvars and set the value below.
-#
-# HuggingFace token secret — Alpamayo 2 Super is gated under the OpenMDW-1.1
-# license. Accept the license at https://huggingface.co/nvidia/Alpamayo2-Super,
-# then store a token (that has accepted the terms) in AWS Secrets Manager and
-# reference the secret's name here.
-hf_secret_name = "your-hf-token-secret"
