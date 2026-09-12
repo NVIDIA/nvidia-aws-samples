@@ -37,6 +37,7 @@ module "terraform-aws-nim" {
     nim = {
       cosmos3 = {
         source_image_uri = var.source_image_uri
+        env              = { NIM_MODEL_SIZE = "nano" } # generator size: nano (8B) / super (32B)
 
         # Cosmos 3 Generator/nano requires Hopper+ (CC >= 9.0) and >= 79 GiB
         # VRAM/device. ml.g7e.2xlarge (1× RTX PRO 6000 Blackwell, 96 GB) clears

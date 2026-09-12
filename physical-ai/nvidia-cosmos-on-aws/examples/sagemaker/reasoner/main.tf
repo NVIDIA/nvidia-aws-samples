@@ -39,21 +39,15 @@ module "terraform-aws-nim" {
   sagemaker_endpoints = {
     nim = {
       cosmos3-reasoner = {
-        source_image_uri = var.source_image_uri
+        source_image_uri = var.source_image_uri # cosmos3-reasoner — a SEPARATE image from the generator
 
-        # Cosmos 3 is one image serving both towers; these env vars select the
-        # Reasoner tower (nano tier). Passed through via the module's
-        # sagemaker_endpoints.nim `env` field.
-        env = {
-          NIM_MODEL_TYPE    = "reasoner"
-          NIM_MODEL_VARIANT = "nano"
-        }
+        # NIM_MODEL_SIZE selects the reasoner size (nano 8B / super 32B).
+        env = { NIM_MODEL_SIZE = "nano" }
 
-        # Cosmos-Reason-class VLM (~8B): single-GPU, 24 GB VRAM minimum. G7e
-        # (RTX PRO 6000 Blackwell, 96 GB) has ample headroom. SageMaker's smallest
-        # G7e size is .2xlarge (no .xlarge). This is the cheap, single-GPU Reasoner
-        # path — not a multi-GPU P5 node.
-        instance_type = "ml.g7e.2xlarge"
+        # Reasoner nano (~8B VLM) runs on an L40S (48 GB, FP8) per the VLM support
+        # matrix — so ml.g6e.2xlarge, far cheaper and more available than the
+        # generator's g7e. (SageMaker's smallest g6e is .2xlarge.)
+        instance_type = "ml.g6e.2xlarge"
 
         # Real-time endpoint (default): text output is fast and small.
         endpoint_type = "realtime"

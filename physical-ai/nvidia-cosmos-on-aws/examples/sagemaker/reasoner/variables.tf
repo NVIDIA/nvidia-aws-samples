@@ -27,6 +27,6 @@ variable "ngc_api_key" {
 
 variable "source_image_uri" {
   type        = string
-  description = "Cosmos 3 NIM container image (public GA). This single image serves both towers; NIM_MODEL_TYPE (set in main.tf) selects reasoner vs generator."
-  default     = "nvcr.io/nim/nvidia/cosmos3:2.0.0"
+  description = "Cosmos 3 Reasoner NIM container image (VLM; text out via POST /v1/chat/completions). A SEPARATE image from the generator. NIM_MODEL_SIZE (set in main.tf) selects nano (8B) vs super (32B)."
+  default     = "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0"
 }
