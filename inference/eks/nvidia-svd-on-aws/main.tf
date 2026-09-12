@@ -89,6 +89,13 @@ module "terraform-aws-nim" {
         protocol         = "grpc"
         # port defaults to 8001 (gRPC convention for Maxine NIMs)
 
+        # node_selection = SVD's VRAM floor (the capacity gate), complementing the
+        # cluster node_pool's NVENC/NVDEC family list (the architecture gate) — the
+        # two gates together. T4's 16 GB clears 15, so all four families stay
+        # eligible and Karpenter still picks the cheapest (g4dn/T4). Rendered into
+        # the pod's nodeAffinity at deploy time.
+        node_selection = { min_gpu_memory_gib = 15 }
+
         # Restrict the inference NLB to the deployer's IP. The internet-facing NLB
         # otherwise accepts traffic from 0.0.0.0/0 (see the module README's
         # "Networking / access control" section for the alternatives — internal-only

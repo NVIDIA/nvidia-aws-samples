@@ -452,10 +452,11 @@ locals {
   }
 
   # --- Per-deployment pod nodeAffinity (from node_selection) ---
-  # Narrows within the cluster NodePool's allow-list. Rendered as a strategic-merge patch
-  # on spec.template.spec.affinity and applied by deploy-nim (reusing MANIFEST_PATCH). Empty
-  # string when there's no node_selection → the buildspec skips patching. Same GiB→MiB +
-  # inclusive Gt/Lt rules as the NodePool.
+  # Narrows within the cluster NodePool's allow-list. Rendered as a YAML affinity block and
+  # injected INTO the deployment manifest at creation (see eks_nim_affinity_yaml) so pods are
+  # born on the right node — NOT patched after apply (which would roll the deployment: revision
+  # 1 without affinity, revision 2 with, briefly doubling GPU demand and oversizing the first
+  # node). Same GiB→MiB + inclusive Gt/Lt rules as the NodePool.
   eks_nim_affinity_exprs = {
     for k, v in var.eks_deployments.nim : k => v.node_selection == null ? [] : concat(
       v.node_selection.instance_types != null ? [
@@ -476,21 +477,30 @@ locals {
       [for r in v.node_selection.extra_requirements : { key = r.key, operator = r.operator, values = r.values }],
     )
   }
-  eks_nim_affinity_patch = {
+  # The nodeAffinity object (null when there's nothing to constrain).
+  eks_nim_affinity_obj = {
     for k, v in var.eks_deployments.nim :
-    k => (length(local.eks_nim_affinity_exprs[k]) == 0 && !(v.node_selection != null && v.node_selection.use_reserved_first)) ? "" : jsonencode({
-      spec = { template = { spec = { affinity = { nodeAffinity = merge(
-        length(local.eks_nim_affinity_exprs[k]) > 0 ? {
-          requiredDuringSchedulingIgnoredDuringExecution = { nodeSelectorTerms = [{ matchExpressions = local.eks_nim_affinity_exprs[k] }] }
-        } : {},
-        (v.node_selection != null && v.node_selection.use_reserved_first) ? {
-          preferredDuringSchedulingIgnoredDuringExecution = [{
-            weight     = 100
-            preference = { matchExpressions = [{ key = "karpenter.sh/capacity-type", operator = "In", values = ["reserved"] }] }
-          }]
-        } : {}
-      ) } } } }
-    })
+    k => (length(local.eks_nim_affinity_exprs[k]) == 0 && !(v.node_selection != null && v.node_selection.use_reserved_first)) ? null : { nodeAffinity = merge(
+      length(local.eks_nim_affinity_exprs[k]) > 0 ? {
+        requiredDuringSchedulingIgnoredDuringExecution = { nodeSelectorTerms = [{ matchExpressions = local.eks_nim_affinity_exprs[k] }] }
+      } : {},
+      (v.node_selection != null && v.node_selection.use_reserved_first) ? {
+        preferredDuringSchedulingIgnoredDuringExecution = [{
+          weight     = 100
+          preference = { matchExpressions = [{ key = "karpenter.sh/capacity-type", operator = "In", values = ["reserved"] }] }
+        }]
+      } : {}
+    ) }
+  }
+
+  # Rendered as a YAML `affinity:` block with 6-space indent baked into EVERY line (pod-spec
+  # level). deploy-nim injects it verbatim into the manifest heredoc at creation. Baking the
+  # indent (vs relying on source indent) is required because bash only applies a source-line
+  # prefix to line 1 of a multi-line var. yamlencode double-quotes keys; kubectl accepts that
+  # (same as the NodePool manifest). Empty string = no affinity block (heredoc line is blank).
+  eks_nim_affinity_yaml = {
+    for k, v in var.eks_deployments.nim :
+    k => local.eks_nim_affinity_obj[k] == null ? "" : "      ${replace(chomp(yamlencode({ affinity = local.eks_nim_affinity_obj[k] })), "\n", "\n      ")}"
   }
 }
 

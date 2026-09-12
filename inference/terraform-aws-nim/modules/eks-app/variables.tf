@@ -196,10 +196,10 @@ variable "manifest_patch" {
   description = "Raw YAML string applied as a strategic-merge patch over the generated raw-manifest Deployment (no-chart path only). Parity with helm_values_override for the raw-kubectl deploy method. Ignored on the Helm path."
 }
 
-variable "node_affinity_patch" {
+variable "node_affinity_yaml" {
   type        = string
   default     = ""
-  description = "Strategic-merge patch (JSON) adding spec.template.spec.affinity.nodeAffinity, rendered by the root module from the deployment's node_selection. Empty string = no patch. Applied to the Deployment so pods land on nodes matching the node_selection (VRAM/family/type). Module-internal; users configure it via node_selection, not directly."
+  description = "YAML affinity block (6-space indented, pod-spec level) rendered by the root module from the deployment's node_selection. Empty string = no affinity. Injected INTO the deployment manifest at creation (base64-transported to CodeBuild) so pods are born on matching nodes with no post-apply patch/rollover. Module-internal; users configure it via node_selection, not directly."
 }
 
 variable "env" {

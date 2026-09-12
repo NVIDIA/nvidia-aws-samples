@@ -7,10 +7,19 @@ module "terraform-aws-nim" {
 
   eks_clusters = {
     llama-nemotron-nano-8b = {
-      vpc_id                  = aws_vpc.main.id
-      private_subnet_ids      = aws_subnet.private[*].id
-      public_subnet_ids       = aws_subnet.public[*].id
-      instance_type           = "g6e.xlarge"
+      vpc_id             = aws_vpc.main.id
+      private_subnet_ids = aws_subnet.private[*].id
+      public_subnet_ids  = aws_subnet.public[*].id
+      # "Declare your needs, don't pick an instance" — the whole point of Karpenter.
+      # instance_families = the GPUs this model runs on (A10G / L4 / L40S, all >=24 GB;
+      # vLLM has no per-GPU profile constraint so any of them works). min_gpu_memory_gib
+      # = the VRAM floor (~16 GB weights + KV headroom). Karpenter provisions the
+      # CHEAPEST family/size that clears both and has capacity — typically g5 (A10G) or
+      # g6 (L4), chosen at apply time, not hand-picked.
+      node_pool = {
+        instance_families  = ["g5", "g6", "g6e"]
+        min_gpu_memory_gib = 20
+      }
       endpoint_public_access  = true
       endpoint_private_access = true
       public_access_cidrs     = ["${chomp(data.http.my_ip.response_body)}/32"]

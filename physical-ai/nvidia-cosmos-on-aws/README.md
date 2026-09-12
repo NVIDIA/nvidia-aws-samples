@@ -65,7 +65,7 @@ The Cosmos 3 **generator** has two levers at two layers:
 
 | Lever | Set where | Set when | Selects |
 |-------|-----------|----------|---------|
-| `NIM_MODEL_SIZE` (`nano` 8B / `super` 32B) | **env var** (module's `env` passthrough) | **deploy time** | which model size loads into VRAM |
+| `NIM_MODEL_VARIANT` (`nano` 8B / `super` 32B) | **env var** (module's `env` passthrough) | **deploy time** | which model size loads into VRAM |
 | `model_mode` (`text2video`, `image2video`, …) | **request JSON field** | **invoke time** | which operation this one call runs |
 
 **Consequence:** you do **not** redeploy to switch modes. One generator deployment
@@ -80,7 +80,7 @@ This sample sets the deploy-time size in
 [`examples/eks/nim/main.tf`](examples/eks/nim/main.tf):
 
 ```hcl
-env = { NIM_MODEL_SIZE = "nano" }
+env = { NIM_MODEL_VARIANT = "nano" }
 ```
 
 ---

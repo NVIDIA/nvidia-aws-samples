@@ -111,6 +111,16 @@ phases:
           done
         fi
 
+      # Decode the node_selection affinity YAML (base64 so its newlines survive the
+      # env-var trip). Injected verbatim into the gRPC/HTTP manifest heredocs below so
+      # pods are born with the affinity — no post-apply patch, no rollover. Empty when
+      # the deployment has no node_selection → the heredoc line renders blank.
+      - |
+        NODE_AFFINITY_YAML=""
+        if [ -n "${NODE_AFFINITY_YAML_B64}" ]; then
+          NODE_AFFINITY_YAML="$(printf '%s' "${NODE_AFFINITY_YAML_B64}" | base64 -d)"
+        fi
+
       # Open-weight: raw kubectl Deployment+Service. Init syncs weights from
       # S3; main runs vllm serve. NIM path is the Helm flow below.
       - |
@@ -285,6 +295,7 @@ phases:
                 app.kubernetes.io/instance: ${RELEASE_NAME}
             spec:
               serviceAccountName: nim-sa
+        ${NODE_AFFINITY_YAML}
               initContainers:
         ${GRPC_ADDITIONAL_INIT_CONTAINERS}
               containers:
@@ -369,12 +380,8 @@ phases:
             cat -n /tmp/grpc-nim-manifest.yaml
             echo "=== end /tmp/grpc-nim-manifest.yaml ==="
 
+            # Affinity is baked into the manifest above (no post-apply patch → no rollover).
             kubectl apply -f /tmp/grpc-nim-manifest.yaml
-            if [ -n "${NODE_AFFINITY_PATCH}" ]; then
-              echo "Applying node_selection affinity to deployment ${RELEASE_NAME}"
-              printf '%s' "${NODE_AFFINITY_PATCH}" > /tmp/node-affinity-patch.json
-              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/node-affinity-patch.json
-            fi
             kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
 
           elif [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; then
@@ -433,6 +440,7 @@ phases:
                 app.kubernetes.io/instance: ${RELEASE_NAME}
             spec:
               serviceAccountName: nim-sa
+        ${NODE_AFFINITY_YAML}
               initContainers:
         ${HTTP_ADDITIONAL_INIT_CONTAINERS}
               containers:
@@ -512,15 +520,9 @@ phases:
 
             kubectl apply -f /tmp/http-nim-manifest.yaml
 
-            # node_selection → pod nodeAffinity (applied before manifest_patch so a
-            # user manifest_patch can still override). Pods are Pending until Karpenter
-            # provisions a node, so patching here (pre-rollout) means the final pods
-            # carry the affinity and Karpenter provisions against it — no wasted nodes.
-            if [ -n "${NODE_AFFINITY_PATCH}" ]; then
-              echo "Applying node_selection affinity to deployment ${RELEASE_NAME}"
-              printf '%s' "${NODE_AFFINITY_PATCH}" > /tmp/node-affinity-patch.json
-              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/node-affinity-patch.json
-            fi
+            # node_selection affinity is baked into the manifest above, so pods are
+            # born on the right node with no post-apply patch and no rollover. A user
+            # manifest_patch (below) still applies on top.
 
             if [ -n "${MANIFEST_PATCH}" ]; then
               echo "Applying manifest_patch to deployment ${RELEASE_NAME}"

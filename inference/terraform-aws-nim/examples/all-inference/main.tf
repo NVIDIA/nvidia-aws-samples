@@ -39,17 +39,21 @@ module "terraform-aws-nim" {
   }
 
   # ---------------------------------------------------------------------------
-  # EKS: one cluster, NIM + open-weight deployments sharing the node.
-  # Uses `g6e.12xlarge` (4× L40S) because two deployments need two GPUs minimum.
-  # Single-deployment examples (`eks/nim`, `eks/open-weight`) use `g6e.xlarge`.
+  # EKS: one cluster, NIM + open-weight deployments. Each needs its own GPU. The
+  # g6e allow-list lets Karpenter provision GPU capacity per pod (a node per replica,
+  # or bin-packed onto a multi-GPU g6e size) — sizing is Karpenter's job now, not a
+  # pinned instance type.
   # ---------------------------------------------------------------------------
 
   eks_clusters = {
     llama-nemotron-nano-8b = {
-      vpc_id                  = aws_vpc.main.id
-      private_subnet_ids      = aws_subnet.private[*].id
-      public_subnet_ids       = aws_subnet.public[*].id
-      instance_type           = "g6e.12xlarge"
+      vpc_id             = aws_vpc.main.id
+      private_subnet_ids = aws_subnet.private[*].id
+      public_subnet_ids  = aws_subnet.public[*].id
+      # Family + VRAM floor: both deployments declare "g6e-class, >=20 GiB" and
+      # Karpenter sizes it. (Kept single-family because the NIM below uses a
+      # GPU-specific profile cache — see examples/eks/open-weight for multi-family.)
+      node_pool               = { instance_families = ["g6e"], min_gpu_memory_gib = 20 }
       endpoint_public_access  = true
       endpoint_private_access = true
       public_access_cidrs     = ["${chomp(data.http.my_ip.response_body)}/32"]

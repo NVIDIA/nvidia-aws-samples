@@ -475,7 +475,7 @@ module "eks_app_nim" {
   helm_chart_s3_uri          = each.value.helm_chart_s3_uri
   helm_values_override       = each.value.helm_values_override
   manifest_patch             = each.value.manifest_patch
-  node_affinity_patch        = local.eks_nim_affinity_patch[each.key]
+  node_affinity_yaml         = local.eks_nim_affinity_yaml[each.key]
   env                        = each.value.env
   gpu_count                  = local.eks_nim_gpu_count[each.key]
   replicas                   = each.value.replicas

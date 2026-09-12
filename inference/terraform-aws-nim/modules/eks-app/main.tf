@@ -204,8 +204,10 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = var.manifest_patch != null ? var.manifest_patch : ""
     }
     environment_variable {
-      name  = "NODE_AFFINITY_PATCH"
-      value = var.node_affinity_patch
+      # Base64 so the multi-line YAML affinity block survives the env-var trip
+      # intact; the buildspec decodes it and injects it into the manifest heredoc.
+      name  = "NODE_AFFINITY_YAML_B64"
+      value = base64encode(var.node_affinity_yaml)
     }
     environment_variable {
       # Newline-separated KEY=VALUE; the raw-manifest path emits each as a
@@ -326,7 +328,7 @@ resource "terraform_data" "deploy_trigger" {
       helm_chart_s3_uri          = var.helm_chart_s3_uri != null ? var.helm_chart_s3_uri : ""
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
       manifest_patch             = var.manifest_patch != null ? var.manifest_patch : ""
-      node_affinity_patch        = var.node_affinity_patch
+      node_affinity_yaml         = var.node_affinity_yaml
       env                        = join("\n", [for k, v in var.env : "${k}=${v}"])
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas

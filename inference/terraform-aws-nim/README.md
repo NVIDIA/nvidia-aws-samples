@@ -1112,6 +1112,20 @@ Two levels:
 - **`eks_clusters[*].node_pool`** — the cluster's Karpenter **allow-list** (the substrate Karpenter may launch from).
 - **`eks_deployments.nim[*].node_selection`** — each NIM's **targeting** within that allow-list (rendered to pod `nodeAffinity`). Different NIMs on one cluster can land on different instance types.
 
+### Two gates, different jobs
+
+`instance_families` and `min_gpu_memory_gib` are **not** interchangeable knobs — they gate on different things, and most real NIMs need both:
+
+- **`instance_families` = the architecture gate.** These are the GPU families a NIM actually has optimized profiles for — take the list straight from the NIM's **support matrix**, not from "what's big enough." A NIM will not run on an unsupported architecture even when the VRAM fits, because its pre-built engines are compiled per-architecture.
+- **`min_gpu_memory_gib` = the capacity gate.** It filters out the too-small *sizes within* those families.
+
+Karpenter then provisions the smallest/cheapest instance that clears **both** gates and has capacity in your account at apply time. Why you can't reduce it to VRAM alone:
+
+- **Cosmos 3 Generator** requires Hopper+ (CC ≥ 9.0) → `["g7e","p5","p5en","p6-b200"]` (RTX PRO 6000 / H100 / H200 / B200). A100 (`p4d`) has 80 GB — clears the VRAM bar — but is Ampere and **architecture-excluded**; L40S (`g6e`, Ada) likewise.
+- **Maxine SVD** requires NVENC/NVDEC video hardware → `["g4dn","g5","g6","g6e"]` (T4 / A10G / L4 / L40S). H100/A100 have far more VRAM but **no video en/decode hardware**, so they're excluded.
+
+Neither list reduces to "any GPU with ≥ N GB." Source `instance_families` from the model's support matrix; use `min_gpu_memory_gib` to size within it.
+
 ### The knobs
 
 | Field | On | Effect |
@@ -1133,17 +1147,22 @@ instance that has capacity.
 
 ```hcl
 eks_clusters = {
-  cosmos = { node_pool = { instance_families = ["g7e", "g6e"] } }   # may launch g7e OR g6e
+  # Cluster allow-list = the UNION of both NIMs' support matrices.
+  cosmos = { node_pool = { instance_families = ["g7e", "g6e"] } }
 }
 eks_deployments = {
   nim = {
-    generator = { cluster_key = "cosmos", node_selection = { min_gpu_memory_gib = 79 } }    # → g7e (96 GB)
-    reasoner  = { cluster_key = "cosmos", node_selection = { instance_families = ["g6e"] } } # → g6e (cheaper)
+    # Generator: Hopper+ only (architecture gate) AND >= 79 GiB (capacity gate).
+    generator = { cluster_key = "cosmos", node_selection = { instance_families = ["g7e"], min_gpu_memory_gib = 79 } } # → g7e (96 GB)
+    # Reasoner: a VLM that runs on Ada — pin the g6e family it actually supports.
+    reasoner  = { cluster_key = "cosmos", node_selection = { instance_families = ["g6e"] } }                          # → g6e (cheaper)
   }
 }
 ```
-One cluster, the generator on a 96 GB `g7e`, the reasoner on a cheaper `g6e` — Karpenter picks
-whichever size in each family has capacity.
+One cluster, two NIMs with **different support matrices**: the generator declares `["g7e"]` (its
+Hopper+ architecture gate) so it can never land on the g6e the reasoner uses, and the reasoner
+pins `["g6e"]`. Each NIM targets its own supported family within the cluster's union allow-list,
+and Karpenter picks whichever size in that family has capacity.
 
 ### Guardrails (so it can't run up a huge bill)
 
