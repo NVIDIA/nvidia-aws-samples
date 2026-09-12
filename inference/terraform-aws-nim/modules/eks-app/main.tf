@@ -204,6 +204,10 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = var.manifest_patch != null ? var.manifest_patch : ""
     }
     environment_variable {
+      name  = "NODE_AFFINITY_PATCH"
+      value = var.node_affinity_patch
+    }
+    environment_variable {
       # Newline-separated KEY=VALUE; the raw-manifest path emits each as a
       # container env entry. Empty when no extra env is set.
       name  = "EXTRA_ENV"
@@ -322,6 +326,7 @@ resource "terraform_data" "deploy_trigger" {
       helm_chart_s3_uri          = var.helm_chart_s3_uri != null ? var.helm_chart_s3_uri : ""
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
       manifest_patch             = var.manifest_patch != null ? var.manifest_patch : ""
+      node_affinity_patch        = var.node_affinity_patch
       env                        = join("\n", [for k, v in var.env : "${k}=${v}"])
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas

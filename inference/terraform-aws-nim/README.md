@@ -1312,6 +1312,62 @@ regardless of which platform they deploy to.
 
 ---
 
+## Inference stack: how requests flow
+
+The diagram above is the **build/deploy** pipeline. This is the **runtime request** path —
+what happens when a client sends an inference request. Understanding the layers clarifies
+what this module owns (endpoints and below) versus what sits in front of it (routing).
+
+```mermaid
+flowchart TB
+    C["Client / application"]
+    C --> R{{"ROUTER / GATEWAY — routes a request to the right MODEL<br/>cloud + model-based: NeMo Switchyard · LiteLLM · API Gateway<br/>local + capacity-based: NVIDIA PAIR<br/>(NOT part of this module — sits in front of the endpoints it produces)"}}
+
+    R -->|"model: video"| NLB1["NLB → Service<br/>(generator)"]
+    R -->|"model: chat"| NLB2["NLB → Service<br/>(reasoner)"]
+    R -->|"model: async"| SME["SageMaker endpoint"]
+
+    subgraph EKS["EKS — one cluster (control plane), Karpenter-provisioned nodes"]
+      direction TB
+      NLB1 --> PodA["pod = 1 NIM replica (1 GPU)"]
+      NLB2 --> PodB["pod = 1 NIM replica (1 GPU)"]
+      PodA --> NodeA["node: g7e.2xlarge<br/>1x RTX PRO 6000 96GB"]
+      PodB --> NodeB["node: g6e.xlarge<br/>1x L40S 48GB"]
+    end
+
+    subgraph SM["SageMaker — fully managed"]
+      direction TB
+      SME --> Inst["instance: ml.g6e.2xlarge<br/>1 container"]
+      SME -. "async" .-> S3["S3 output object"]
+    end
+```
+
+### What each layer is (and who owns it)
+
+| Layer | EKS | SageMaker | This module? |
+|-------|-----|-----------|--------------|
+| **Route** — pick which *model* a request wants | external router (Switchyard / LiteLLM / API GW / PAIR) | same | ❌ in front |
+| **Endpoint** — one stable address per model | NLB per deployment | endpoint per model | ✅ |
+| **Replica LB** — spread load across a model's copies | k8s `Service` → pods | managed across instances | ✅ |
+| **Autoscale** | KEDA/HPA (pods) + Karpenter (nodes) | endpoint auto scaling (instances) | ✅ |
+| **Compute unit** | **pod = 1 GPU**; a multi-GPU node holds several pods | **instance = 1 container** | ✅ |
+| **Node/instance type** | **many per cluster** (NodePool allow-list + `nodeSelector`) | **one per endpoint** | ✅ |
+
+### Key facts the diagram encodes
+
+- **You route to a *model*, never to a node.** The router picks a model → its endpoint; the
+  `Service`/scheduler place the work on nodes. Nodes are a Karpenter implementation detail.
+- **One NIM replica = one GPU.** On EKS, `gpu_count` GPUs per pod (tensor-parallel if >1); a
+  bigger node just holds more pods. On SageMaker, one container per instance.
+- **EKS can mix instance types in one cluster** (put the reasoner on cheap `g6e`, the
+  generator on `g7e`) — see the NodePool `requirements` allow-list. SageMaker gets this for
+  free since each endpoint picks its own instance.
+- **The router is a separate layer.** This module is the **deploy layer** — it produces the
+  endpoints (NLBs / SageMaker endpoints). Putting Switchyard / LiteLLM / an API gateway in
+  front to route across many models is a distinct concern (and a distinct component).
+
+---
+
 ## Examples
 
 - [sagemaker/nim/](examples/sagemaker/nim/) — NIM on SageMaker

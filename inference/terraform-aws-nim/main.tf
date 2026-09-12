@@ -58,10 +58,13 @@ resource "terraform_data" "validation" {
     precondition {
       condition = alltrue([
         for k, v in var.eks_deployments.nim :
-        !contains(keys(local.instance_gpu_count), var.eks_clusters[v.cluster_key].instance_type)
-        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type]
+        # Only checkable when node_selection pins exactly one known instance type;
+        # VRAM/family-based selection can't be validated at plan (GPU count unknown).
+        v.node_selection == null || v.node_selection.instance_types == null || length(coalesce(v.node_selection.instance_types, [])) != 1
+        || !contains(keys(local.instance_gpu_count), v.node_selection.instance_types[0])
+        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[v.node_selection.instance_types[0]]
       ])
-      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its cluster's instance_type provides. Reduce gpu_count, or pick an instance_type with more GPUs."
+      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its pinned node_selection.instance_types provides. Reduce gpu_count, or pin an instance type with more GPUs."
     }
 
     # Future PR: restore enable_asset_build precondition when re-enabling custom build path.
@@ -413,7 +416,7 @@ module "eks_infra" {
   vpc_id                  = each.value.vpc_id
   private_subnet_ids      = each.value.private_subnet_ids
   public_subnet_ids       = each.value.public_subnet_ids
-  instance_type           = each.value.instance_type
+  nodepool_manifest       = local.eks_nodepool_manifest[each.key]
   kubernetes_version      = each.value.kubernetes_version
   cache_bucket_arn        = local.cluster_has_cache[each.key] ? aws_s3_bucket.nim_cache[0].arn : null
   enable_cache_iam        = local.cluster_has_cache[each.key]
@@ -472,6 +475,7 @@ module "eks_app_nim" {
   helm_chart_s3_uri          = each.value.helm_chart_s3_uri
   helm_values_override       = each.value.helm_values_override
   manifest_patch             = each.value.manifest_patch
+  node_affinity_patch        = local.eks_nim_affinity_patch[each.key]
   env                        = each.value.env
   gpu_count                  = local.eks_nim_gpu_count[each.key]
   replicas                   = each.value.replicas

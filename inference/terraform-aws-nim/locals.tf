@@ -252,11 +252,14 @@ locals {
       for k, v in var.eks_deployments.nim :
       "eks/${k}" => {
         source_image_uri = v.source_image_uri
-        instance_type    = var.eks_clusters[v.cluster_key].instance_type
-        model_profile    = null
-        sync_to_ecr      = true
-        force_rebuild    = v.force_rebuild
-        debug            = v.debug
+        # NIM profiles are GPU-specific; the cache only makes sense when node_selection
+        # pins a single instance type. VRAM/family-based selection leaves this "" (the
+        # cache is effectively a no-op / should be disabled — see README).
+        instance_type = try(v.node_selection.instance_types[0], "")
+        model_profile = null
+        sync_to_ecr   = true
+        force_rebuild = v.force_rebuild
+        debug         = v.debug
       }
       if v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)
     }
@@ -356,24 +359,109 @@ locals {
   #
   # Resolution order:
   #   1. explicit gpu_count in eks_deployments (non-null) → use directly
-  #   2. auto-derived from cluster instance_type via instance_gpu_count table
-  #   3. fallback: 1 (unknown instance type — set gpu_count explicitly)
+  #   2. auto-derived from a single pinned node_selection.instance_types entry via
+  #      the instance_gpu_count table (only when exactly one type is pinned)
+  #   3. fallback: 1 (VRAM/family-based selection or unknown type — set gpu_count
+  #      explicitly for multi-GPU / tensor-parallel deployments)
   eks_nim_gpu_count = {
     for k, v in var.eks_deployments.nim :
     k => coalesce(
       v.gpu_count,
-      try(local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type], null),
+      (v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
+        ? try(local.instance_gpu_count[v.node_selection.instance_types[0]], null)
+      : null),
       1
     )
   }
 
+  # open_weight has no node_selection yet — explicit gpu_count or fallback 1.
   eks_ow_gpu_count = {
     for k, v in var.eks_deployments.open_weight :
-    k => coalesce(
-      v.gpu_count,
-      try(local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type], null),
-      1
+    k => coalesce(v.gpu_count, 1)
+  }
+
+  # --- EKS GPU NodePool manifest (per cluster) ---
+  # node_pool defines the cluster-wide allow-list Karpenter may launch from; deployments
+  # narrow within it via pod nodeAffinity (node_selection). Built as a full manifest here
+  # (yamlencode handles indentation) and applied by cluster-setup. VRAM is GiB in the API
+  # but MiB on the Karpenter label, so *1024. Gt/Lt are strict, so -1/+1 makes the band
+  # inclusive of the stated GiB value.
+  eks_nodepool_requirements = {
+    for k, c in var.eks_clusters : k => concat(
+      [
+        { key = "karpenter.k8s.aws/instance-gpu-manufacturer", operator = "In", values = ["nvidia"] },
+        { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
+        { key = "karpenter.sh/capacity-type", operator = "In", values = ["on-demand"] },
+      ],
+      c.node_pool.instance_families != null ? [
+        { key = "karpenter.k8s.aws/instance-family", operator = "In", values = c.node_pool.instance_families }
+      ] : [],
+      c.node_pool.min_gpu_memory_gib != null ? [
+        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Gt", values = [tostring(c.node_pool.min_gpu_memory_gib * 1024 - 1)] }
+      ] : [],
+      c.node_pool.max_gpu_memory_gib != null ? [
+        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Lt", values = [tostring(c.node_pool.max_gpu_memory_gib * 1024 + 1)] }
+      ] : [],
     )
+  }
+  eks_nodepool_manifest = {
+    for k, c in var.eks_clusters : k => yamlencode({
+      apiVersion = "karpenter.sh/v1"
+      kind       = "NodePool"
+      metadata   = { name = "${local.name_prefix}-${k}-gpu" }
+      spec = {
+        template = {
+          spec = {
+            nodeClassRef = { group = "eks.amazonaws.com", kind = "NodeClass", name = "default" }
+            requirements = local.eks_nodepool_requirements[k]
+          }
+        }
+        limits     = { "nvidia.com/gpu" = tostring(c.node_pool.max_gpus) }
+        disruption = { consolidationPolicy = "WhenEmptyOrUnderutilized", consolidateAfter = "1m" }
+      }
+    })
+  }
+
+  # --- Per-deployment pod nodeAffinity (from node_selection) ---
+  # Narrows within the cluster NodePool's allow-list. Rendered as a strategic-merge patch
+  # on spec.template.spec.affinity and applied by deploy-nim (reusing MANIFEST_PATCH). Empty
+  # string when there's no node_selection → the buildspec skips patching. Same GiB→MiB +
+  # inclusive Gt/Lt rules as the NodePool.
+  eks_nim_affinity_exprs = {
+    for k, v in var.eks_deployments.nim : k => v.node_selection == null ? [] : concat(
+      v.node_selection.instance_types != null ? [
+        { key = "node.kubernetes.io/instance-type", operator = "In", values = v.node_selection.instance_types }
+      ] : [],
+      v.node_selection.instance_families != null ? [
+        { key = "karpenter.k8s.aws/instance-family", operator = "In", values = v.node_selection.instance_families }
+      ] : [],
+      v.node_selection.min_gpu_memory_gib != null ? [
+        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Gt", values = [tostring(v.node_selection.min_gpu_memory_gib * 1024 - 1)] }
+      ] : [],
+      v.node_selection.max_gpu_memory_gib != null ? [
+        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Lt", values = [tostring(v.node_selection.max_gpu_memory_gib * 1024 + 1)] }
+      ] : [],
+      length(v.node_selection.deny_instance_types) > 0 ? [
+        { key = "node.kubernetes.io/instance-type", operator = "NotIn", values = v.node_selection.deny_instance_types }
+      ] : [],
+      [for r in v.node_selection.extra_requirements : { key = r.key, operator = r.operator, values = r.values }],
+    )
+  }
+  eks_nim_affinity_patch = {
+    for k, v in var.eks_deployments.nim :
+    k => (length(local.eks_nim_affinity_exprs[k]) == 0 && !(v.node_selection != null && v.node_selection.use_reserved_first)) ? "" : jsonencode({
+      spec = { template = { spec = { affinity = { nodeAffinity = merge(
+        length(local.eks_nim_affinity_exprs[k]) > 0 ? {
+          requiredDuringSchedulingIgnoredDuringExecution = { nodeSelectorTerms = [{ matchExpressions = local.eks_nim_affinity_exprs[k] }] }
+        } : {},
+        (v.node_selection != null && v.node_selection.use_reserved_first) ? {
+          preferredDuringSchedulingIgnoredDuringExecution = [{
+            weight     = 100
+            preference = { matchExpressions = [{ key = "karpenter.sh/capacity-type", operator = "In", values = ["reserved"] }] }
+          }]
+        } : {}
+      ) } } } }
+    })
   }
 }
 
@@ -521,7 +609,7 @@ locals {
   # Avoids a filtered-map key-miss when the module references this for every nim entry.
   eks_cache_prefix = {
     for k, v in var.eks_deployments.nim :
-    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${var.eks_clusters[v.cluster_key].instance_type}" : null
+    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${try(v.node_selection.instance_types[0], "")}" : null
   }
 }
 

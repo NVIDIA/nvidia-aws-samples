@@ -178,7 +178,7 @@ resource "aws_eks_access_policy_association" "additional" {
 resource "aws_codebuild_project" "cluster_setup" {
   region        = var.region
   name          = "${var.name_prefix}-cluster-setup"
-  description   = "Configure EKS Auto Mode GPU NodePool for ${var.instance_type} NIM nodes"
+  description   = "Configure EKS Auto Mode GPU NodePool for ${var.name_prefix} NIM nodes"
   service_role  = aws_iam_role.codebuild_setup.arn
   build_timeout = 60
 
@@ -198,8 +198,8 @@ resource "aws_codebuild_project" "cluster_setup" {
       value = var.region
     }
     environment_variable {
-      name  = "GPU_INSTANCE_TYPE"
-      value = var.instance_type
+      name  = "NODEPOOL_MANIFEST_B64"
+      value = base64encode(var.nodepool_manifest)
     }
     environment_variable {
       name  = "NAME_PREFIX"
@@ -248,7 +248,7 @@ resource "terraform_data" "cluster_setup_trigger" {
     {
       cluster_name       = aws_eks_cluster.nim.name
       cluster_version    = aws_eks_cluster.nim.version
-      instance_type      = var.instance_type
+      nodepool_hash      = sha1(var.nodepool_manifest)
       enable_autoscaling = var.enable_autoscaling
       debug              = var.debug
       buildspec_hash     = filemd5("${path.module}/buildspecs/cluster-setup.yml")

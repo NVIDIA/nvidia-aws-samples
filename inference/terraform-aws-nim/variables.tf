@@ -428,10 +428,20 @@ variable "sagemaker_endpoints" {
 
 variable "eks_clusters" {
   type = map(object({
-    vpc_id                  = string
-    private_subnet_ids      = list(string)
-    public_subnet_ids       = list(string)
-    instance_type           = string
+    vpc_id             = string
+    private_subnet_ids = list(string)
+    public_subnet_ids  = list(string)
+    # node_pool: the cluster's GPU NodePool substrate (the allow-list Karpenter may
+    # launch from). Omit for the broad default (any NVIDIA GPU instance). Individual
+    # deployments narrow within this via eks_deployments[*].node_selection.
+    node_pool = optional(object({
+      instance_families         = optional(list(string))     # allow-list, e.g. ["g6e","g7e"]; null = any NVIDIA GPU
+      min_gpu_memory_gib        = optional(number)           # cluster-wide VRAM floor
+      max_gpu_memory_gib        = optional(number)           # cluster-wide VRAM ceiling (cost guard)
+      max_gpus                  = optional(number, 100)      # NodePool GPU limit = hard spend cap
+      capacity_reservation_ids  = optional(list(string), []) # ODCR / Capacity Block IDs → used first
+      capacity_reservation_tags = optional(map(string), {})  # select reservations by tag
+    }), {})
     kubernetes_version      = optional(string, "1.35")
     endpoint_public_access  = optional(bool, true)
     endpoint_private_access = optional(bool, true)
@@ -471,8 +481,19 @@ variable "eks_clusters" {
                                 NAT gateway outbound internet access for NGC pulls.
       public_subnet_ids       — Public subnets for load balancer placement. Must be
                                 tagged kubernetes.io/role/elb=1.
-      instance_type           — EC2 GPU instance type for NIM nodes (e.g. g6e.12xlarge).
-                                No ml. prefix. Sets the Karpenter NodePool constraint.
+      node_pool               — GPU NodePool substrate for this cluster (optional). Sets the
+                                Karpenter allow-list Karpenter may launch from. Omit for the
+                                broad default (any NVIDIA GPU). Fields:
+                                  instance_families         — allow-list of EC2 GPU families
+                                                              (e.g. ["g6e","g7e"]); null = any.
+                                  min/max_gpu_memory_gib    — cluster-wide VRAM floor/ceiling
+                                                              (the ceiling is a cost guard).
+                                  max_gpus                  — NodePool GPU limit = hard spend cap.
+                                  capacity_reservation_ids/_tags — ODCR / Capacity Block for ML
+                                                              selectors; reserved capacity is used
+                                                              first. See "Capacity" in the README.
+                                Per-deployment targeting (which NIM lands on which node type)
+                                is set via eks_deployments[*].node_selection.
       kubernetes_version      — EKS Kubernetes version. Default "1.35" (latest standard support
                                    as of January 2026, available in all regions).
       endpoint_public_access  — Enable public API server endpoint. Default true.
@@ -515,7 +536,7 @@ variable "eks_clusters" {
           vpc_id                  = aws_vpc.main.id
           private_subnet_ids      = aws_subnet.private[*].id
           public_subnet_ids       = aws_subnet.public[*].id
-          instance_type           = "g6e.12xlarge"
+          node_pool               = { instance_families = ["g6e"] }
           endpoint_public_access  = true
           endpoint_private_access = true
           public_access_cidrs     = ["203.0.113.0/24"]  # your office IP
@@ -528,7 +549,7 @@ variable "eks_clusters" {
           vpc_id                  = aws_vpc.main.id
           private_subnet_ids      = aws_subnet.private[*].id
           public_subnet_ids       = aws_subnet.public[*].id
-          instance_type           = "g6e.12xlarge"
+          node_pool               = { min_gpu_memory_gib = 40 }  # any NVIDIA GPU >= 40 GiB
           endpoint_public_access  = false
           endpoint_private_access = true
         }
@@ -552,15 +573,30 @@ variable "eks_deployments" {
       manifest_patch             = optional(string, null)
       env                        = optional(map(string), {})
       gpu_count                  = optional(number, null)
-      replicas                   = optional(number, 1)
-      namespace                  = optional(string, null)
-      load_balancer_internal     = optional(bool, false)
-      nlb_allowed_cidr_blocks    = optional(list(string), null)
-      debug                      = optional(bool, false)
-      force_rebuild              = optional(bool, false)
-      additional_scripts         = optional(list(object({ source = string })), [])
-      protocol                   = optional(string, "http")
-      port                       = optional(number, null)
+      # node_selection: which node type THIS NIM's pods should run on, rendered into
+      # the pod's nodeAffinity. Omit → pods run anywhere the cluster node_pool allows.
+      # Set model-appropriate values from the NIM's support matrix (module ships no
+      # default). Users write GiB; the module converts to the MiB Karpenter expects.
+      node_selection = optional(object({
+        instance_types      = optional(list(string))     # hard pin, e.g. ["g7e.2xlarge"]
+        instance_families   = optional(list(string))     # allow-list, e.g. ["g6e"]
+        min_gpu_memory_gib  = optional(number)           # VRAM floor for this NIM
+        max_gpu_memory_gib  = optional(number)           # VRAM ceiling (don't grab a bigger/pricier card)
+        deny_instance_types = optional(list(string), []) # never run on these
+        use_reserved_first  = optional(bool, false)      # prefer the cluster's capacity reservations
+        extra_requirements = optional(list(object({      # raw Karpenter/affinity escape hatch
+          key = string, operator = string, values = list(string)
+        })), [])
+      }), null)
+      replicas                = optional(number, 1)
+      namespace               = optional(string, null)
+      load_balancer_internal  = optional(bool, false)
+      nlb_allowed_cidr_blocks = optional(list(string), null)
+      debug                   = optional(bool, false)
+      force_rebuild           = optional(bool, false)
+      additional_scripts      = optional(list(object({ source = string })), [])
+      protocol                = optional(string, "http")
+      port                    = optional(number, null)
       autoscaling = optional(object({
         min_replicas     = optional(number, 1)
         max_replicas     = optional(number, 5)
@@ -821,6 +857,59 @@ variable "eks_deployments" {
       v.load_balancer_internal == true || (v.nlb_allowed_cidr_blocks != null && length(v.nlb_allowed_cidr_blocks) > 0)
     ])
     error_message = "eks_deployments.open_weight: when load_balancer_internal = false, nlb_allowed_cidr_blocks must be a non-empty list to restrict inference endpoint access. To open explicitly to the whole internet, pass [\"0.0.0.0/0\"]."
+  }
+
+  # node_selection: an instance type can't be both allowed and denied.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      v.node_selection == null ? true : length(setintersection(
+        coalesce(v.node_selection.instance_types, []),
+        v.node_selection.deny_instance_types
+      )) == 0
+    ])
+    error_message = "eks_deployments.nim.node_selection: an instance type cannot be in both instance_types and deny_instance_types."
+  }
+
+  # node_selection: VRAM band must be sane.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      v.node_selection == null ? true : (
+        v.node_selection.min_gpu_memory_gib == null || v.node_selection.max_gpu_memory_gib == null ||
+        v.node_selection.min_gpu_memory_gib <= v.node_selection.max_gpu_memory_gib
+      )
+    ])
+    error_message = "eks_deployments.nim.node_selection: min_gpu_memory_gib must be <= max_gpu_memory_gib."
+  }
+
+  # node_selection: if set, it must actually constrain something (else omit it and
+  # inherit the cluster node_pool).
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      v.node_selection == null ? true : (
+        (v.node_selection.instance_types != null && length(v.node_selection.instance_types) > 0) ||
+        (v.node_selection.instance_families != null && length(v.node_selection.instance_families) > 0) ||
+        v.node_selection.min_gpu_memory_gib != null ||
+        length(v.node_selection.extra_requirements) > 0
+      )
+    ])
+    error_message = "eks_deployments.nim.node_selection: set at least one of instance_types, instance_families, min_gpu_memory_gib, or extra_requirements (or omit node_selection to inherit the cluster node_pool)."
+  }
+
+  # node_selection.use_reserved_first only makes sense if the cluster has a reservation.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      (v.node_selection == null || v.node_selection.use_reserved_first != true) ? true : (
+        contains(keys(var.eks_clusters), v.cluster_key) && (
+          length(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_ids) > 0 ||
+          length(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_tags) > 0
+        )
+      )
+    ])
+    error_message = "eks_deployments.nim.node_selection.use_reserved_first = true requires the referenced cluster's node_pool to define capacity_reservation_ids or capacity_reservation_tags."
   }
 }
 

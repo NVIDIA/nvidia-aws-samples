@@ -370,6 +370,11 @@ phases:
             echo "=== end /tmp/grpc-nim-manifest.yaml ==="
 
             kubectl apply -f /tmp/grpc-nim-manifest.yaml
+            if [ -n "${NODE_AFFINITY_PATCH}" ]; then
+              echo "Applying node_selection affinity to deployment ${RELEASE_NAME}"
+              printf '%s' "${NODE_AFFINITY_PATCH}" > /tmp/node-affinity-patch.json
+              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/node-affinity-patch.json
+            fi
             kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
 
           elif [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; then
@@ -506,6 +511,16 @@ phases:
             echo "=== end /tmp/http-nim-manifest.yaml ==="
 
             kubectl apply -f /tmp/http-nim-manifest.yaml
+
+            # node_selection → pod nodeAffinity (applied before manifest_patch so a
+            # user manifest_patch can still override). Pods are Pending until Karpenter
+            # provisions a node, so patching here (pre-rollout) means the final pods
+            # carry the affinity and Karpenter provisions against it — no wasted nodes.
+            if [ -n "${NODE_AFFINITY_PATCH}" ]; then
+              echo "Applying node_selection affinity to deployment ${RELEASE_NAME}"
+              printf '%s' "${NODE_AFFINITY_PATCH}" > /tmp/node-affinity-patch.json
+              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/node-affinity-patch.json
+            fi
 
             if [ -n "${MANIFEST_PATCH}" ]; then
               echo "Applying manifest_patch to deployment ${RELEASE_NAME}"
