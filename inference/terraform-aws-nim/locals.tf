@@ -386,25 +386,49 @@ locals {
   # (yamlencode handles indentation) and applied by cluster-setup. VRAM is GiB in the API
   # but MiB on the Karpenter label, so *1024. Gt/Lt are strict, so -1/+1 makes the band
   # inclusive of the stated GiB value.
+  # Per-cluster reservation state.
+  eks_cluster_has_reservations = {
+    for k, c in var.eks_clusters :
+    k => length(c.node_pool.capacity_reservation_ids) > 0 || length(c.node_pool.capacity_reservation_tags) > 0
+  }
   eks_nodepool_requirements = {
     for k, c in var.eks_clusters : k => concat(
       [
-        { key = "karpenter.k8s.aws/instance-gpu-manufacturer", operator = "In", values = ["nvidia"] },
+        { key = "eks.amazonaws.com/instance-gpu-manufacturer", operator = "In", values = ["nvidia"] },
         { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
-        { key = "karpenter.sh/capacity-type", operator = "In", values = ["on-demand"] },
+        # Reserved first (drain the ODCR / Capacity Block), then on-demand fallback, when
+        # the cluster has a reservation; on-demand only otherwise.
+        { key = "karpenter.sh/capacity-type", operator = "In", values = local.eks_cluster_has_reservations[k] ? ["reserved", "on-demand"] : ["on-demand"] },
       ],
       c.node_pool.instance_families != null ? [
-        { key = "karpenter.k8s.aws/instance-family", operator = "In", values = c.node_pool.instance_families }
+        { key = "eks.amazonaws.com/instance-family", operator = "In", values = c.node_pool.instance_families }
       ] : [],
       c.node_pool.min_gpu_memory_gib != null ? [
-        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Gt", values = [tostring(c.node_pool.min_gpu_memory_gib * 1024 - 1)] }
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(c.node_pool.min_gpu_memory_gib * 1024 - 1)] }
       ] : [],
       c.node_pool.max_gpu_memory_gib != null ? [
-        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Lt", values = [tostring(c.node_pool.max_gpu_memory_gib * 1024 + 1)] }
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(c.node_pool.max_gpu_memory_gib * 1024 + 1)] }
       ] : [],
     )
   }
-  eks_nodepool_manifest = {
+  # Custom NodeClass, only when reservations are configured. Minimal spec — EKS Auto Mode
+  # supplies role/subnet/SG defaults. WARNING (per AWS docs): setting
+  # capacityReservationSelectorTerms on ANY NodeClass stops Auto Mode from auto-using open
+  # ODCRs cluster-wide, so reserved capacity must be explicitly selected from then on.
+  eks_nodeclass_manifest = {
+    for k, c in var.eks_clusters : k => local.eks_cluster_has_reservations[k] ? yamlencode({
+      apiVersion = "eks.amazonaws.com/v1"
+      kind       = "NodeClass"
+      metadata   = { name = "${local.name_prefix}-${k}-gpu-nc" }
+      spec = {
+        capacityReservationSelectorTerms = concat(
+          [for id in c.node_pool.capacity_reservation_ids : { id = id }],
+          length(c.node_pool.capacity_reservation_tags) > 0 ? [{ tags = c.node_pool.capacity_reservation_tags }] : []
+        )
+      }
+    }) : ""
+  }
+  eks_nodepool_only_manifest = {
     for k, c in var.eks_clusters : k => yamlencode({
       apiVersion = "karpenter.sh/v1"
       kind       = "NodePool"
@@ -412,7 +436,7 @@ locals {
       spec = {
         template = {
           spec = {
-            nodeClassRef = { group = "eks.amazonaws.com", kind = "NodeClass", name = "default" }
+            nodeClassRef = { group = "eks.amazonaws.com", kind = "NodeClass", name = local.eks_cluster_has_reservations[k] ? "${local.name_prefix}-${k}-gpu-nc" : "default" }
             requirements = local.eks_nodepool_requirements[k]
           }
         }
@@ -420,6 +444,11 @@ locals {
         disruption = { consolidationPolicy = "WhenEmptyOrUnderutilized", consolidateAfter = "1m" }
       }
     })
+  }
+  # Applied by cluster-setup: NodeClass first (if any), then NodePool (multi-doc YAML).
+  eks_nodepool_manifest = {
+    for k, c in var.eks_clusters :
+    k => local.eks_cluster_has_reservations[k] ? "${local.eks_nodeclass_manifest[k]}\n---\n${local.eks_nodepool_only_manifest[k]}" : local.eks_nodepool_only_manifest[k]
   }
 
   # --- Per-deployment pod nodeAffinity (from node_selection) ---
@@ -433,13 +462,13 @@ locals {
         { key = "node.kubernetes.io/instance-type", operator = "In", values = v.node_selection.instance_types }
       ] : [],
       v.node_selection.instance_families != null ? [
-        { key = "karpenter.k8s.aws/instance-family", operator = "In", values = v.node_selection.instance_families }
+        { key = "eks.amazonaws.com/instance-family", operator = "In", values = v.node_selection.instance_families }
       ] : [],
       v.node_selection.min_gpu_memory_gib != null ? [
-        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Gt", values = [tostring(v.node_selection.min_gpu_memory_gib * 1024 - 1)] }
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(v.node_selection.min_gpu_memory_gib * 1024 - 1)] }
       ] : [],
       v.node_selection.max_gpu_memory_gib != null ? [
-        { key = "karpenter.k8s.aws/instance-gpu-memory", operator = "Lt", values = [tostring(v.node_selection.max_gpu_memory_gib * 1024 + 1)] }
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(v.node_selection.max_gpu_memory_gib * 1024 + 1)] }
       ] : [],
       length(v.node_selection.deny_instance_types) > 0 ? [
         { key = "node.kubernetes.io/instance-type", operator = "NotIn", values = v.node_selection.deny_instance_types }
