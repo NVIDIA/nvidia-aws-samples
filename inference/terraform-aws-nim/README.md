@@ -1098,6 +1098,89 @@ curl http://<nlb-hostname>:8000/v1/chat/completions \
 
 ---
 
+## GPU node selection
+
+You don't pick an EC2 instance type — you declare what a model *needs* (GPU family and/or
+VRAM), and **EKS Auto Mode (managed Karpenter)** provisions the cheapest available instance
+that satisfies it, across GPU families and Availability Zones. This directly attacks GPU
+scarcity: instead of "deployment failed — no `g6e.2xlarge` capacity," you get "found and
+launched the cheapest node that fits."
+
+Two levels:
+- **`eks_clusters[*].node_pool`** — the cluster's Karpenter **allow-list** (the substrate Karpenter may launch from).
+- **`eks_deployments.nim[*].node_selection`** — each NIM's **targeting** within that allow-list (rendered to pod `nodeAffinity`). Different NIMs on one cluster can land on different instance types.
+
+### The knobs
+
+| Field | On | Effect |
+|-------|----|--------|
+| `instance_families` | node_pool / node_selection | Allow-list of EC2 GPU families, e.g. `["g6e","g7e"]` |
+| `min_gpu_memory_gib` / `max_gpu_memory_gib` | both | VRAM floor / ceiling (GiB). The ceiling is a cost guard — bounds how big a card Karpenter may grab |
+| `instance_types` | node_selection | Hard-pin exact types (most control) |
+| `deny_instance_types` | node_selection | Never run on these |
+| `gpu_count` | deployment (top-level) | GPUs per pod (tensor-parallel if > 1) |
+| `capacity_reservation_ids` / `_tags` | node_pool | Use your ODCR / Capacity Block first (see below) |
+| `max_gpus` | node_pool | Hard cap on total GPUs the NodePool can provision = spend ceiling |
+| `extra_requirements` | node_selection | Raw Karpenter requirements escape hatch |
+
+You write **GiB**; the module converts to the MiB the `eks.amazonaws.com/instance-gpu-memory`
+label expects. Constraints combine as **AND**, and Karpenter picks the **cheapest** matching
+instance that has capacity.
+
+### Example — one cluster, two NIMs, different GPUs
+
+```hcl
+eks_clusters = {
+  cosmos = { node_pool = { instance_families = ["g7e", "g6e"] } }   # may launch g7e OR g6e
+}
+eks_deployments = {
+  nim = {
+    generator = { cluster_key = "cosmos", node_selection = { min_gpu_memory_gib = 79 } }    # → g7e (96 GB)
+    reasoner  = { cluster_key = "cosmos", node_selection = { instance_families = ["g6e"] } } # → g6e (cheaper)
+  }
+}
+```
+One cluster, the generator on a 96 GB `g7e`, the reasoner on a cheaper `g6e` — Karpenter picks
+whichever size in each family has capacity.
+
+### Guardrails (so it can't run up a huge bill)
+
+- **VRAM ceiling** — `max_gpu_memory_gib` (e.g. `min = 79, max = 100` stays on ~96 GB cards, never an 8×H100 P5).
+- **Family allow-list / denylist** — `instance_families` / `deny_instance_types`.
+- **NodePool cap** — `max_gpus`, a hard ceiling on total GPUs the cluster can ever provision.
+- Karpenter **consolidates** underutilized nodes automatically, and honors PodDisruptionBudgets and the `karpenter.sh/do-not-disrupt` annotation, so it won't evict in-flight inference.
+
+### Capacity Reservations (ODCR / Capacity Blocks for ML)
+
+Set `node_pool.capacity_reservation_ids` (or `_tags`) and the module renders a custom NodeClass
+with `capacityReservationSelectorTerms`; the NodePool then prefers `reserved` capacity (drains
+your reservation first) and falls back to on-demand. This is the **deterministic** answer to GPU
+scarcity — pair it with the best-effort multi-family / multi-AZ selection above (the module's
+VPC already spans AZs, and Karpenter searches them).
+
+> **Note:** configuring a capacity reservation on any NodeClass makes Auto Mode stop
+> auto-using *open* ODCRs cluster-wide (per AWS) — reserved capacity is then explicit-only.
+
+### Why managed Karpenter (EKS Auto Mode)
+
+The module runs on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html),
+where AWS operates [Karpenter](https://karpenter.sh/) for you — you supply the NodePool/NodeClass,
+AWS runs the controller. That's a core reason one `terraform apply` works end-to-end (self-managed
+Karpenter or static node groups would mean installing and operating the autoscaler yourself). Note
+Auto Mode uses `eks.amazonaws.com/*` node labels, not self-managed Karpenter's `karpenter.k8s.aws/*`.
+
+### Seeing what got picked
+
+Node choice is a **runtime** decision (Karpenter provisions after apply), so it isn't a Terraform
+output — inspect it live:
+```bash
+kubectl get nodeclaims                              # what Karpenter launched (+ capacity-type)
+kubectl describe nodeclaim <name>                   # the requirements it satisfied
+kubectl get nodes -L node.kubernetes.io/instance-type,karpenter.sh/capacity-type
+```
+
+---
+
 ## Capacity, failures, and retries
 
 GPU capacity — especially newer SKUs like G7e (RTX PRO 6000), P5 (H100), and P5e/P5en
