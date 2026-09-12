@@ -10,7 +10,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 module "terraform-aws-nim" {
-  source = "git::https://github.com/NVIDIA/nvidia-aws-samples.git//inference/terraform-aws-nim?ref=main"
+  # Local relative source during development so this example tests against local
+  # terraform-aws-nim edits (not the published module). Before publishing, switch back to:
+  #   source = "git::https://github.com/NVIDIA/nvidia-aws-samples.git//inference/terraform-aws-nim?ref=main"
+  source = "../../terraform-aws-nim"
 
   project_prefix = "svd"
   environment    = "dev"
@@ -40,11 +43,13 @@ module "terraform-aws-nim" {
       #   * Best on-demand availability in us-east-1 across AZs
       #   * Tradeoff: ~5x slower per video than L40S (~24s vs ~5s on the sample clip)
       #
-      # Upgrade paths if you need more throughput:
-      #   g5.2xlarge  — 1× A10G (24 GB) — modest step up, broader availability than g6/g6e
-      #   g6.2xlarge  — 1× L4   (24 GB) — closest cost/perf compromise below L40S
-      #   g6e.2xlarge — 1× L40S (48 GB) — best throughput; matches SageMaker ml.g6e.2xlarge
-      instance_type = "g4dn.2xlarge"
+      # node_pool lists ALL of SVD's supported GPU families (T4/A10G/L4/L40S). Karpenter
+      # provisions whichever has capacity across AZs — a direct hedge against GPU scarcity,
+      # since SVD runs functionally on any of them (throughput differs: L40S fastest, T4
+      # cheapest/most-available). Narrow to one family, or add a deployment node_selection,
+      # to pin a specific GPU.
+      #   SVD v2 adds datacenter GPUs (A100/H100/H200/B200) — append p4d/p5/p5e/p6 then.
+      node_pool = { instance_families = ["g4dn", "g5", "g6", "g6e"] }
 
       endpoint_public_access  = true
       endpoint_private_access = true
