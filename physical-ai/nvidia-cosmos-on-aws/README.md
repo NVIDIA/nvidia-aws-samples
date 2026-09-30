@@ -145,7 +145,8 @@ a **minimum per-device VRAM** — an architecture floor, not just a memory floor
 | Generator / super (32B) | ≥ 121 GiB (FP8) · ≥ 150 GiB (BF16) · ≥ 131 GiB (NVFP4) | ❌ needs multi-GPU tensor-parallel |
 
 NVIDIA explicitly lists **RTX PRO 6000 Blackwell Server Edition (96 GB)** as a
-validated Cosmos 3 SKU — that's the GPU in the **`g7e`** family this sample targets:
+validated Cosmos 3 SKU — one of the Hopper+ SKUs in the family matrix this sample
+targets (`g7e`/`p5`/`p5en`/`p6-b200`), with `g7e` the usual nano landing spot:
 
 | AWS instance | GPU | Cosmos 3 nano? | Why |
 |--------------|-----|----------------|-----|
@@ -153,7 +154,8 @@ validated Cosmos 3 SKU — that's the GPU in the **`g7e`** family this sample ta
 | `p4d`/`p4de` | A100 40/80 GB | ❌ | Ampere CC 8.0 < Hopper 9.0 |
 | **`g7e.2xlarge`** | **1× RTX PRO 6000 Blackwell 96 GB** | ✅ **default** | validated SKU; clears the ≥ 79 GiB nano floor on **one** GPU (`gpu_count = 1`); far cheaper than 8× H100 |
 | `g7e.12xl/24xl/48xl` | 2/4/8× RTX PRO 6000 | ✅ (super) | multi-GPU for the super tier — set `gpu_count` |
-| `p5`/`p5e`/`p5en` | 8× H100/H200 | ✅ | also valid; 8-GPU nodes (~$98/hr for p5) |
+| `p5`/`p5en` | 8× H100/H200 | ✅ | also valid; 8-GPU nodes (~$98/hr for p5) |
+| `p6-b200` | 8× B200 192 GB | ✅ (super) | Blackwell; clears the fp8 (≥121) & bf16 (≥150) super floors |
 
 > **Precision:** the RTX PRO 6000 is Blackwell, so it supports **BF16, FP8, and
 > NVFP4** (NVFP4 requires Blackwell, CC ≥ 10.0). Nano supports all three.
@@ -161,15 +163,18 @@ validated Cosmos 3 SKU — that's the GPU in the **`g7e`** family this sample ta
 ### How the sample expresses this
 
 Rather than pinning an exact instance type, the sample declares the *requirement* and lets
-EKS Auto Mode (managed Karpenter) pick the cheapest `g7e` size with capacity, across AZs:
+EKS Auto Mode (managed Karpenter) pick the cheapest supported size across the
+`g7e`/`p5`/`p5en`/`p6-b200` families and AZs:
 
 ```hcl
-eks_clusters    = { cosmos = { node_pool = { instance_families = ["g7e"] } } }         # allow-list
+eks_clusters    = { cosmos = { node_pool = { instance_families = ["g7e", "p5", "p5en", "p6-b200"] } } } # allow-list
 eks_deployments = { nim = { cosmos3 = { node_selection = { min_gpu_memory_gib = 79 } } } } # the need
 ```
 
 Pin exactly instead with `node_selection = { instance_types = ["g7e.2xlarge"] }`. For the
-super (32B) tier, add larger `g7e` sizes / `p5` families and set `gpu_count > 1` (tensor-
+super (32B) tier, raise `min_gpu_memory_gib` (121 for fp8 → H200/B200, 150 for bf16 → B200)
+and/or set `gpu_count > 1` (tensor-parallel) — the `p5`/`p5en`/`p6-b200` families are already
+allow-listed, so there's nothing to add;
 parallel). See the module README's [GPU node selection](../../inference/terraform-aws-nim/README.md#gpu-node-selection)
 for the full knob set (VRAM band, denylist, capacity reservations, cost caps).
 

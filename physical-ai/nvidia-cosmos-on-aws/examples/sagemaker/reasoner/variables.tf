@@ -1,6 +1,6 @@
 variable "region" {
   type        = string
-  description = "AWS region to deploy into. Defaults to the current AWS provider region if not set. Requires ml.g7e.2xlarge SageMaker endpoint quota in the chosen region."
+  description = "AWS region to deploy into. Defaults to the current AWS provider region if not set. Requires ml.g6e.2xlarge SageMaker endpoint quota in the chosen region."
   default     = null
 }
 

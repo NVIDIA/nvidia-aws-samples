@@ -1,8 +1,10 @@
 # example: eks/grpc
 
 Deploys NVIDIA Maxine **Synthetic Video Detector (SVD)** — a media NIM that serves
-inference over **gRPC** — onto an EKS Auto Mode cluster on `g6e.2xlarge`
-([1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/), 48 GB VRAM).
+inference over **gRPC** — onto an EKS Auto Mode cluster. The cluster's `node_pool` allows a
+broad [g4dn / g5 / g6 / g6e](https://aws.amazon.com/ec2/instance-types/g6e/) family list
+(T4 / A10G / L4 / L40S); with no VRAM floor, Karpenter typically lands on the cheapest — a
+`g4dn` (1× NVIDIA T4, 16 GB VRAM).
 
 This example exercises the module's gRPC path:
 
@@ -11,8 +13,10 @@ This example exercises the module's gRPC path:
 - `nim_type = "custom"` — Maxine NIMs ship no Helm chart on NGC today. The module's raw
   `kubectl apply` path emits a `Deployment` + `Service` directly.
 
-`g6e.2xlarge` is chosen to match the SageMaker `ml.g6e.2xlarge` family so EKS↔SageMaker
-performance comparisons stay apples-to-apples (same GPU, same vCPU/RAM).
+The `node_pool` deliberately allows four GPU families (`g4dn`, `g5`, `g6`, `g6e`) rather
+than pinning one instance type — Karpenter picks whichever is cheapest with capacity in your
+region, which keeps this demo runnable when a specific size is constrained. Narrow
+`instance_families` (or add a `min_gpu_memory_gib` floor) if you need a particular GPU.
 
 > [!IMPORTANT]
 > **SVD requires NGC private-access program entitlement.** The `base-sync` CodeBuild

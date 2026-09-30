@@ -4,11 +4,13 @@ Deploys raw HuggingFace model weights onto an EKS Auto Mode cluster using vLLM. 
 NIM container or Helm chart involved — an init container syncs weights from S3 and the main
 container runs `vllm/vllm-openai` directly.
 
-Configured for `nvidia/Llama-3.1-Nemotron-Nano-8B-v1` on `g6e.xlarge` ([1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/), 48 GB VRAM). This model is
-public on HuggingFace (NVIDIA Open Model License) — no HuggingFace token required.
+Configured for `nvidia/Llama-3.1-Nemotron-Nano-8B-v1` on a Karpenter-selected
+[g5 / g6 / g6e](https://aws.amazon.com/ec2/instance-types/g6e/) node (A10G / L4 / L40S, all
+≥ 24 GB VRAM). This model is public on HuggingFace (NVIDIA Open Model License) — no
+HuggingFace token required.
 
-Change `model_id`, `model_source`, and `instance_type` in [main.tf](main.tf) to target a
-different model.
+Change `model_id`, `model_source`, and the cluster's `node_pool` / deployment's
+`node_selection` in [main.tf](main.tf) to target a different model or GPU.
 
 ---
 

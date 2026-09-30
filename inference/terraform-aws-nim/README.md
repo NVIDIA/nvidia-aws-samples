@@ -203,11 +203,13 @@ module "inference" {
   }
 
   sagemaker_endpoints = {
-    llama-3-1-8b = {
-      source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
-      instance_type              = "ml.g6e.12xlarge"
-      endpoint_type              = "realtime"
-      enable_model_profile_cache = true
+    nim = {
+      llama-3-1-8b = {
+        source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+        instance_type              = "ml.g6e.12xlarge"
+        endpoint_type              = "realtime"
+        enable_model_profile_cache = true
+      }
     }
   }
 }
@@ -220,15 +222,17 @@ and one S3 cache prefix — no duplicate storage or builds.
 
 ```hcl
 sagemaker_endpoints = {
-  llama-3-1-8b = {
-    source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
-    instance_type              = "ml.g6e.12xlarge"
-    enable_model_profile_cache = true
-  }
-  nemotron-nano = {
-    source_image_uri           = "nvcr.io/nim/nvidia/nemotron-3-nano:2.0.2"
-    instance_type              = "ml.g6e.12xlarge"
-    enable_model_profile_cache = true
+  nim = {
+    llama-3-1-8b = {
+      source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+      instance_type              = "ml.g6e.12xlarge"
+      enable_model_profile_cache = true
+    }
+    nemotron-nano = {
+      source_image_uri           = "nvcr.io/nim/nvidia/nemotron-3-nano:2.0.2"
+      instance_type              = "ml.g6e.12xlarge"
+      enable_model_profile_cache = true
+    }
   }
 }
 ```
@@ -240,10 +244,12 @@ limit (e.g. vision models receiving base64-encoded image frames).
 
 ```hcl
 sagemaker_endpoints = {
-  alpamayo = {
-    source_image_uri = "nvcr.io/nim/nvidia/alpamayo:1.0.0"
-    instance_type    = "ml.g6e.12xlarge"
-    endpoint_type    = "async"
+  nim = {
+    alpamayo = {
+      source_image_uri = "nvcr.io/nim/nvidia/alpamayo:1.0.0"
+      instance_type    = "ml.g6e.12xlarge"
+      endpoint_type    = "async"
+    }
   }
 }
 ```
@@ -280,10 +286,12 @@ required.
 
 ```hcl
 sagemaker_endpoints = {
-  llama-8b = {
-    model_id      = "meta-llama/Llama-3.1-8B-Instruct"
-    model_source  = "huggingface"   # "huggingface" | "ngc"
-    instance_type = "ml.g6e.12xlarge"
+  open_weight = {
+    llama-8b = {
+      model_id      = "meta-llama/Llama-3.1-8B-Instruct"
+      model_source  = "huggingface"   # "huggingface" | "ngc"
+      instance_type = "ml.g6e.12xlarge"
+    }
   }
 }
 ```
@@ -294,14 +302,16 @@ documented on the model card or when overriding recipe defaults.
 
 ```hcl
 sagemaker_endpoints = {
-  llama-8b = {
-    model_id      = "meta-llama/Llama-3.1-8B-Instruct"
-    model_source  = "huggingface"
-    instance_type = "ml.g6e.12xlarge"
-    extra_args = {
-      max-model-len    = "32768"
-      dtype            = "bfloat16"
-      reasoning-parser = "qwen3"    # empty string "" for boolean flags
+  open_weight = {
+    llama-8b = {
+      model_id      = "meta-llama/Llama-3.1-8B-Instruct"
+      model_source  = "huggingface"
+      instance_type = "ml.g6e.12xlarge"
+      extra_args = {
+        max-model-len    = "32768"
+        dtype            = "bfloat16"
+        reasoning-parser = "qwen3"    # empty string "" for boolean flags
+      }
     }
   }
 }
@@ -333,12 +343,14 @@ vLLM Recipes database.
 
 ```hcl
 sagemaker_endpoints = {
-  llama-8b = {
-    model_id           = "meta-llama/Llama-3.1-8B-Instruct"
-    model_source       = "huggingface"
-    instance_type      = "ml.g6e.12xlarge"
-    enable_vllm_recipe = true       # fetch optimized flags from recipes.vllm.ai
-    vllm_precision     = "default"  # "default" (bf16) or "fp8"
+  open_weight = {
+    llama-8b = {
+      model_id           = "meta-llama/Llama-3.1-8B-Instruct"
+      model_source       = "huggingface"
+      instance_type      = "ml.g6e.12xlarge"
+      enable_vllm_recipe = true       # fetch optimized flags from recipes.vllm.ai
+      vllm_precision     = "default"  # "default" (bf16) or "fp8"
+    }
   }
 }
 ```
@@ -469,7 +481,7 @@ eks_clusters = {
     vpc_id              = aws_vpc.main.id
     private_subnet_ids  = aws_subnet.private[*].id
     public_subnet_ids   = aws_subnet.public[*].id
-    instance_type       = "g6e.12xlarge"
+    node_pool           = { instance_families = ["g6e"] }
     allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
     internet_gateway_id = aws_internet_gateway.main.id
   }
@@ -482,6 +494,8 @@ eks_deployments = {
       source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
       enable_model_profile_cache = true
       helm_chart_version         = "2.0.3"
+      # Required when load_balancer_internal = false (the default) — restrict NLB access.
+      nlb_allowed_cidr_blocks = ["<your-ip>/32"]
     }
   }
 }
@@ -533,7 +547,7 @@ eks_clusters = {
     vpc_id              = aws_vpc.main.id
     private_subnet_ids  = aws_subnet.private[*].id
     public_subnet_ids   = aws_subnet.public[*].id
-    instance_type       = "g6e.48xlarge"
+    node_pool           = { instance_families = ["g6e"] }
     allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
     internet_gateway_id = aws_internet_gateway.main.id
   }
@@ -781,7 +795,11 @@ Kubernetes' NVIDIA device plugin allocates GPUs exclusively per pod — one pod 
 - `g6e.12xlarge` (4× L40S) → up to **four NIM pods per node** (with `gpu_count = 1` each).
 - `g6e.48xlarge` (8× L40S) → up to **eight pods per node**.
 
-Practical tradeoffs when picking an `eks_clusters[*].instance_type`:
+You don't pin a single instance type. The cluster's `eks_clusters[*].node_pool` sets the
+GPU substrate Karpenter may provision from — an `instance_families` allow-list and/or a
+`min_gpu_memory_gib` floor — and each deployment can narrow within it via
+`eks_deployments[*].node_selection`. Practical tradeoffs when choosing how wide or narrow to
+make that allow-list (and thus what size Karpenter lands on):
 
 - **Smaller instances (g6e.xlarge, g6e.2xlarge)** — scaling granularity is one-pod-per-node,
   so Karpenter's decisions are simple. Downside: more nodes = more base overhead (kubelet,
@@ -796,9 +814,10 @@ Practical tradeoffs when picking an `eks_clusters[*].instance_type`:
 - **NVIDIA MPS** — GPU time-sharing across pods. Not recommended for latency-sensitive
   inference due to contention.
 
-For a demo or POC, single-GPU instances are fine. For real multi-tenant production, sizing to
-match your baseline load (e.g. `min_replicas = 4` on a `g6e.12xlarge` cluster = one node
-always warm) is usually the right call.
+For a demo or POC, a single-GPU family (e.g. `node_pool = { instance_families = ["g6e"] }`)
+is fine. For real multi-tenant production, sizing to match your baseline load — a wider
+`instance_families` allow-list plus `min_replicas` set so at least one node stays warm — is
+usually the right call.
 
 ---
 
@@ -897,14 +916,18 @@ module "inference" {
 
   # SageMaker — NIM and open weight side-by-side for A/B
   sagemaker_endpoints = {
-    llama-nim = {
-      source_image_uri = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
-      instance_type    = "ml.g6e.12xlarge"
+    nim = {
+      llama-nim = {
+        source_image_uri = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+        instance_type    = "ml.g6e.12xlarge"
+      }
     }
-    llama-vllm = {
-      model_id      = "meta-llama/Llama-3.1-8B-Instruct"
-      model_source  = "huggingface"
-      instance_type = "ml.g6e.12xlarge"
+    open_weight = {
+      llama-vllm = {
+        model_id      = "meta-llama/Llama-3.1-8B-Instruct"
+        model_source  = "huggingface"
+        instance_type = "ml.g6e.12xlarge"
+      }
     }
   }
 
@@ -914,7 +937,7 @@ module "inference" {
       vpc_id             = aws_vpc.main.id
       private_subnet_ids = aws_subnet.private[*].id
       public_subnet_ids  = aws_subnet.public[*].id
-      instance_type      = "g6e.12xlarge"
+      node_pool          = { instance_families = ["g6e"] }
       allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
       internet_gateway_id = aws_internet_gateway.main.id
     }
@@ -924,6 +947,8 @@ module "inference" {
       llama-eks = {
         cluster_key      = "gpu-cluster"
         source_image_uri = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+        # Required when load_balancer_internal = false (the default) — restrict NLB access.
+        nlb_allowed_cidr_blocks = ["<your-ip>/32"]
       }
     }
   }
@@ -1093,7 +1118,7 @@ kubectl get svc -n nim -l "app.kubernetes.io/instance=<release-name>" \
 
 curl http://<nlb-hostname>:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"Who is Jensen Huang in one sentence?"}]}'
+  -d '{"model":"nvidia/llama-3.1-nemotron-nano-8b-v1","messages":[{"role":"user","content":"Who is Jensen Huang in one sentence?"}]}'
 ```
 
 ---
