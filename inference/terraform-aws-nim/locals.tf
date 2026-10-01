@@ -252,10 +252,10 @@ locals {
       for k, v in var.eks_deployments.nim :
       "eks/${k}" => {
         source_image_uri = v.source_image_uri
-        # NIM profiles are GPU-specific; the cache only makes sense when node_selection
-        # pins a single instance type. VRAM/family-based selection leaves this "" (the
-        # cache is effectively a no-op / should be disabled — see README).
-        instance_type = try(v.node_selection.instance_types[0], "")
+        # NIM profiles are GPU-specific; the cache is built for the pinned instance type
+        # (a single node_selection.instance_types entry, or the cluster's instance_type).
+        # A precondition in main.tf requires one when the cache is enabled.
+        instance_type = (local.eks_nim_pinned_type[k] == null ? "" : local.eks_nim_pinned_type[k])
         model_profile = null
         sync_to_ecr   = true
         force_rebuild = v.force_rebuild
@@ -359,18 +359,27 @@ locals {
   #
   # Resolution order:
   #   1. explicit gpu_count in eks_deployments (non-null) → use directly
-  #   2. auto-derived from a single pinned node_selection.instance_types entry via
-  #      the instance_gpu_count table (only when exactly one type is pinned)
+  #   2. auto-derived from the pinned instance type (a single node_selection.instance_types
+  #      entry, else the cluster's instance_type) via the instance_gpu_count table
   #   3. fallback: 1 (VRAM/family-based selection or unknown type — set gpu_count
   #      explicitly for multi-GPU / tensor-parallel deployments)
   eks_nim_gpu_count = {
     for k, v in var.eks_deployments.nim :
     k => coalesce(
       v.gpu_count,
-      (v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
-        ? try(local.instance_gpu_count[v.node_selection.instance_types[0]], null)
-      : null),
+      local.eks_nim_pinned_type[k] != null ? try(local.instance_gpu_count[local.eks_nim_pinned_type[k]], null) : null,
       1
+    )
+  }
+
+  # The single instance type a NIM deployment will land on, when one is pinned: exactly
+  # one node_selection.instance_types entry, else the cluster's instance_type, else null
+  # (family/VRAM-based selection — the type, and so the GPU count, is unknown at plan).
+  eks_nim_pinned_type = {
+    for k, v in var.eks_deployments.nim : k => (
+      v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
+      ? v.node_selection.instance_types[0]
+      : try(var.eks_clusters[v.cluster_key].instance_type, null)
     )
   }
 
@@ -386,13 +395,30 @@ locals {
   # (yamlencode handles indentation) and applied by cluster-setup. VRAM is GiB in the API
   # but MiB on the Karpenter label, so *1024. Gt/Lt are strict, so -1/+1 makes the band
   # inclusive of the stated GiB value.
+  # Normalized node_pool: null (omitted) → the broad default. A cluster that sets only
+  # instance_type is also given the defaults (it is rendered as a pinned pool below).
+  eks_node_pool = {
+    for k, c in var.eks_clusters : k => c.node_pool != null ? c.node_pool : {
+      instance_families         = null
+      min_gpu_memory_gib        = null
+      max_gpu_memory_gib        = null
+      max_gpus                  = 100
+      capacity_reservation_ids  = []
+      capacity_reservation_tags = {}
+    }
+  }
   # Per-cluster reservation state.
   eks_cluster_has_reservations = {
     for k, c in var.eks_clusters :
-    k => length(c.node_pool.capacity_reservation_ids) > 0 || length(c.node_pool.capacity_reservation_tags) > 0
+    k => length(local.eks_node_pool[k].capacity_reservation_ids) > 0 || length(local.eks_node_pool[k].capacity_reservation_tags) > 0
   }
   eks_nodepool_requirements = {
-    for k, c in var.eks_clusters : k => concat(
+    # instance_type (legacy / pinned): exactly the original NodePool requirements.
+    for k, c in var.eks_clusters : k => c.instance_type != null ? [
+      { key = "node.kubernetes.io/instance-type", operator = "In", values = [c.instance_type] },
+      { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
+      { key = "karpenter.sh/capacity-type", operator = "In", values = ["on-demand"] },
+      ] : concat(
       [
         { key = "eks.amazonaws.com/instance-gpu-manufacturer", operator = "In", values = ["nvidia"] },
         { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
@@ -400,14 +426,14 @@ locals {
         # the cluster has a reservation; on-demand only otherwise.
         { key = "karpenter.sh/capacity-type", operator = "In", values = local.eks_cluster_has_reservations[k] ? ["reserved", "on-demand"] : ["on-demand"] },
       ],
-      c.node_pool.instance_families != null ? [
-        { key = "eks.amazonaws.com/instance-family", operator = "In", values = c.node_pool.instance_families }
+      local.eks_node_pool[k].instance_families != null ? [
+        { key = "eks.amazonaws.com/instance-family", operator = "In", values = local.eks_node_pool[k].instance_families }
       ] : [],
-      c.node_pool.min_gpu_memory_gib != null ? [
-        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(c.node_pool.min_gpu_memory_gib * 1024 - 1)] }
+      local.eks_node_pool[k].min_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(local.eks_node_pool[k].min_gpu_memory_gib * 1024 - 1)] }
       ] : [],
-      c.node_pool.max_gpu_memory_gib != null ? [
-        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(c.node_pool.max_gpu_memory_gib * 1024 + 1)] }
+      local.eks_node_pool[k].max_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(local.eks_node_pool[k].max_gpu_memory_gib * 1024 + 1)] }
       ] : [],
     )
   }
@@ -428,8 +454,8 @@ locals {
         subnetSelectorTerms        = [for id in c.private_subnet_ids : { id = id }]
         securityGroupSelectorTerms = [{ tags = { "aws:eks:cluster-name" = "${local.name_prefix}-${k}" } }]
         capacityReservationSelectorTerms = concat(
-          [for id in c.node_pool.capacity_reservation_ids : { id = id }],
-          length(c.node_pool.capacity_reservation_tags) > 0 ? [{ tags = c.node_pool.capacity_reservation_tags }] : []
+          [for id in local.eks_node_pool[k].capacity_reservation_ids : { id = id }],
+          length(local.eks_node_pool[k].capacity_reservation_tags) > 0 ? [{ tags = local.eks_node_pool[k].capacity_reservation_tags }] : []
         )
       }
     }) : ""
@@ -446,7 +472,7 @@ locals {
             requirements = local.eks_nodepool_requirements[k]
           }
         }
-        limits     = { "nvidia.com/gpu" = tostring(c.node_pool.max_gpus) }
+        limits     = { "nvidia.com/gpu" = tostring(local.eks_node_pool[k].max_gpus) }
         disruption = { consolidationPolicy = "WhenEmptyOrUnderutilized", consolidateAfter = "1m" }
       }
     })
@@ -654,7 +680,7 @@ locals {
   # Avoids a filtered-map key-miss when the module references this for every nim entry.
   eks_cache_prefix = {
     for k, v in var.eks_deployments.nim :
-    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${try(v.node_selection.instance_types[0], "")}" : null
+    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${(local.eks_nim_pinned_type[k] == null ? "" : local.eks_nim_pinned_type[k])}" : null
   }
 }
 

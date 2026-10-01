@@ -51,20 +51,30 @@ resource "terraform_data" "validation" {
       error_message = "One or more eks_deployments entries set `autoscaling` but their target cluster does not have `enable_autoscaling = true`. Enable autoscaling on the cluster first."
     }
 
-    # gpu_count (explicit or auto-derived) must not exceed the GPUs the cluster's
-    # instance_type physically has — otherwise the pod is unschedulable and hangs
-    # Pending forever. Only checked for instance types in the known GPU-count table
-    # (unknown types fall back to 1 and can't be validated). Fails fast at apply.
+    # gpu_count (explicit or auto-derived) must not exceed the GPUs on the pinned
+    # instance type (a single node_selection.instance_types entry, else the cluster's
+    # instance_type) — otherwise the pod is unschedulable and hangs Pending forever.
+    # Only checked for types in the known GPU-count table. VRAM/family-based selection
+    # can't be validated at plan (the type, so GPU count, is unknown).
     precondition {
       condition = alltrue([
         for k, v in var.eks_deployments.nim :
-        # Only checkable when node_selection pins exactly one known instance type;
-        # VRAM/family-based selection can't be validated at plan (GPU count unknown).
-        v.node_selection == null || v.node_selection.instance_types == null || length(coalesce(v.node_selection.instance_types, [])) != 1
-        || !contains(keys(local.instance_gpu_count), v.node_selection.instance_types[0])
-        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[v.node_selection.instance_types[0]]
+        local.eks_nim_pinned_type[k] == null
+        || !contains(keys(local.instance_gpu_count), local.eks_nim_pinned_type[k])
+        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[local.eks_nim_pinned_type[k]]
       ])
-      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its pinned node_selection.instance_types provides. Reduce gpu_count, or pin an instance type with more GPUs."
+      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its pinned instance type provides. Reduce gpu_count, or pin an instance type with more GPUs."
+    }
+
+    # The model profile cache is built for ONE specific GPU (NIM profiles are
+    # GPU-specific). Require a pinned instance type — a single
+    # node_selection.instance_types entry, or the cluster's instance_type.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        !(v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)) || local.eks_nim_pinned_type[k] != null
+      ])
+      error_message = "eks_deployments.nim: enable_model_profile_cache = true (llm/embedding) requires a pinned instance type — exactly one node_selection.instance_types entry (e.g. [\"g6e.xlarge\"]) or the cluster's instance_type. The cache is built for that GPU. Pin one, or disable the cache."
     }
 
     # Future PR: restore enable_asset_build precondition when re-enabling custom build path.

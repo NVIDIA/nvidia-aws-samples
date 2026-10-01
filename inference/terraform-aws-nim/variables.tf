@@ -431,9 +431,13 @@ variable "eks_clusters" {
     vpc_id             = string
     private_subnet_ids = list(string)
     public_subnet_ids  = list(string)
+    # instance_type: pin the cluster's GPU NodePool to ONE EC2 instance type (the original
+    # behavior). Mutually exclusive with node_pool. For flexible selection by family / VRAM
+    # use node_pool instead.
+    instance_type = optional(string, null)
     # node_pool: the cluster's GPU NodePool substrate (the allow-list Karpenter may
-    # launch from). Omit for the broad default (any NVIDIA GPU instance). Individual
-    # deployments narrow within this via eks_deployments[*].node_selection.
+    # launch from). Omit (with no instance_type) for the broad default (any NVIDIA GPU
+    # instance). Individual deployments narrow within this via eks_deployments[*].node_selection.
     node_pool = optional(object({
       instance_families         = optional(list(string))     # allow-list, e.g. ["g6e","g7e"]; null = any NVIDIA GPU
       min_gpu_memory_gib        = optional(number)           # cluster-wide VRAM floor
@@ -441,7 +445,7 @@ variable "eks_clusters" {
       max_gpus                  = optional(number, 100)      # NodePool GPU limit = hard spend cap
       capacity_reservation_ids  = optional(list(string), []) # ODCR / Capacity Block IDs → used first
       capacity_reservation_tags = optional(map(string), {})  # select reservations by tag
-    }), {})
+    }), null)
     kubernetes_version      = optional(string, "1.35")
     endpoint_public_access  = optional(bool, true)
     endpoint_private_access = optional(bool, true)
@@ -481,6 +485,11 @@ variable "eks_clusters" {
                                 NAT gateway outbound internet access for NGC pulls.
       public_subnet_ids       — Public subnets for load balancer placement. Must be
                                 tagged kubernetes.io/role/elb=1.
+      instance_type           — Pin the cluster's GPU NodePool to ONE EC2 instance type
+                                (e.g. "g6e.xlarge"; no "ml." prefix). Optional; mutually
+                                exclusive with node_pool. A cluster with instance_type and no
+                                node_pool behaves as a node pool pinned to that type, and
+                                GPU counts are derived from it.
       node_pool               — GPU NodePool substrate for this cluster (optional). Sets the
                                 Karpenter allow-list Karpenter may launch from. Omit for the
                                 broad default (any NVIDIA GPU). Fields:
@@ -555,6 +564,13 @@ variable "eks_clusters" {
         }
       }
   EOD
+
+  validation {
+    condition = alltrue([
+      for k, c in var.eks_clusters : c.instance_type == null || c.node_pool == null
+    ])
+    error_message = "eks_clusters: set either instance_type (pin one instance type) or node_pool (Karpenter chooses by family/VRAM), not both."
+  }
 }
 
 variable "eks_deployments" {
@@ -838,18 +854,6 @@ variable "eks_deployments" {
       v.port == null || (v.port >= 1 && v.port <= 65535)
     ])
     error_message = "eks_deployments.nim: port must be null (use default) or a valid TCP port (1-65535)."
-  }
-
-  # The profile cache is built for ONE specific GPU (NIM profiles are GPU-specific), taken
-  # from node_selection.instance_types[0]. Without exactly one pinned type the cache build
-  # runs with an empty INSTANCE_TYPE and may pick a generic/wrong profile.
-  validation {
-    condition = alltrue([
-      for k, v in var.eks_deployments.nim :
-      !(v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)) ||
-      length(try(v.node_selection.instance_types, null) == null ? [] : v.node_selection.instance_types) == 1
-    ])
-    error_message = "eks_deployments.nim: enable_model_profile_cache = true (llm/embedding) requires node_selection.instance_types to contain exactly one instance type (e.g. [\"g6e.xlarge\"]) — the cache is built for that GPU. Pin one type or disable the cache."
   }
 
   # NGC_API_KEY is supplied from the secret-backed env entry; letting callers set it via
