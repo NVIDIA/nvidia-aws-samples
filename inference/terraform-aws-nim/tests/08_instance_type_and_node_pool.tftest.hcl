@@ -252,3 +252,98 @@ run "ngc_api_key_in_env_rejected" {
 
   expect_failures = [var.eks_deployments]
 }
+
+# node_pool.instance_types: exact-type allow-list (Karpenter still picks the cheapest).
+run "node_pool_instance_types_allow_list" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["g6e.xlarge", "g6e.2xlarge"] }
+      }
+    }
+  }
+
+  assert {
+    condition = anytrue([
+      for r in yamldecode(output.eks_nodepool_manifests["gpu"]).spec.template.spec.requirements :
+      r.key == "node.kubernetes.io/instance-type" && r.operator == "In" && r.values == ["g6e.xlarge", "g6e.2xlarge"]
+    ])
+    error_message = "node_pool.instance_types should render an instance-type In requirement"
+  }
+}
+
+# types and families together render both requirements (Karpenter ANDs them).
+run "node_pool_instance_types_and_families" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["g6e.xlarge"], instance_families = ["g6e"] }
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      anytrue([for r in yamldecode(output.eks_nodepool_manifests["gpu"]).spec.template.spec.requirements : r.key == "node.kubernetes.io/instance-type"])
+      && anytrue([for r in yamldecode(output.eks_nodepool_manifests["gpu"]).spec.template.spec.requirements : r.key == "eks.amazonaws.com/instance-family"])
+    )
+    error_message = "types and families should both be rendered"
+  }
+}
+
+# A node_pool that allows exactly one type pins it like instance_type does: the GPU-count
+# check uses it (g6e.xlarge has 1 GPU, so gpu_count = 2 fails).
+run "single_type_node_pool_pins_gpu_count" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["g6e.xlarge"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          gpu_count               = 2
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+run "node_pool_instance_types_rejects_ml_prefix" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["ml.g6e.xlarge"] }
+      }
+    }
+  }
+
+  expect_failures = [var.eks_clusters]
+}

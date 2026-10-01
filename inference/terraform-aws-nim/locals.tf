@@ -379,7 +379,12 @@ locals {
     for k, v in var.eks_deployments.nim : k => (
       v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
       ? v.node_selection.instance_types[0]
-      : try(var.eks_clusters[v.cluster_key].instance_type, null)
+      : (
+        # cluster-level pin: instance_type, or a node_pool that allows exactly one type
+        try(var.eks_clusters[v.cluster_key].instance_type, null) != null ? var.eks_clusters[v.cluster_key].instance_type : (
+          try(length(local.eks_node_pool[v.cluster_key].instance_types), 0) == 1 ? local.eks_node_pool[v.cluster_key].instance_types[0] : null
+        )
+      )
     )
   }
 
@@ -400,6 +405,7 @@ locals {
   eks_node_pool = {
     for k, c in var.eks_clusters : k => c.node_pool != null ? c.node_pool : {
       instance_families         = null
+      instance_types            = null
       min_gpu_memory_gib        = null
       max_gpu_memory_gib        = null
       max_gpus                  = 100
@@ -426,6 +432,9 @@ locals {
         # the cluster has a reservation; on-demand only otherwise.
         { key = "karpenter.sh/capacity-type", operator = "In", values = local.eks_cluster_has_reservations[k] ? ["reserved", "on-demand"] : ["on-demand"] },
       ],
+      local.eks_node_pool[k].instance_types != null ? [
+        { key = "node.kubernetes.io/instance-type", operator = "In", values = local.eks_node_pool[k].instance_types }
+      ] : [],
       local.eks_node_pool[k].instance_families != null ? [
         { key = "eks.amazonaws.com/instance-family", operator = "In", values = local.eks_node_pool[k].instance_families }
       ] : [],

@@ -440,6 +440,7 @@ variable "eks_clusters" {
     # instance). Individual deployments narrow within this via eks_deployments[*].node_selection.
     node_pool = optional(object({
       instance_families         = optional(list(string))     # allow-list, e.g. ["g6e","g7e"]; null = any NVIDIA GPU
+      instance_types            = optional(list(string))     # exact types, e.g. ["g6e.xlarge","g6e.2xlarge"]; null = any
       min_gpu_memory_gib        = optional(number)           # cluster-wide VRAM floor
       max_gpu_memory_gib        = optional(number)           # cluster-wide VRAM ceiling (cost guard)
       max_gpus                  = optional(number, 100)      # NodePool GPU limit = hard spend cap
@@ -493,7 +494,14 @@ variable "eks_clusters" {
       node_pool               — GPU NodePool substrate for this cluster (optional). Sets the
                                 Karpenter allow-list Karpenter may launch from. Omit for the
                                 broad default (any NVIDIA GPU). Fields:
-                                  instance_families         — allow-list of EC2 GPU families
+                                  instance_types            — allow-list of exact EC2 types
+                                                          (e.g. ["g6e.xlarge","g6e.2xlarge"]);
+                                                          null = any. Combined with
+                                                          instance_families as AND (Karpenter
+                                                          requirements intersect), so use one
+                                                          or the other unless you want the
+                                                          intersection.
+                              instance_families         — allow-list of EC2 GPU families
                                                               (e.g. ["g6e","g7e"]); null = any.
                                   min/max_gpu_memory_gib    — cluster-wide VRAM floor/ceiling
                                                               (the ceiling is a cost guard).
@@ -570,6 +578,17 @@ variable "eks_clusters" {
       for k, c in var.eks_clusters : c.instance_type == null || c.node_pool == null
     ])
     error_message = "eks_clusters: set either instance_type (pin one instance type) or node_pool (Karpenter chooses by family/VRAM), not both."
+  }
+
+  validation {
+    condition = alltrue([
+      for k, c in var.eks_clusters :
+      c.node_pool == null || c.node_pool.instance_types == null || (
+        length(c.node_pool.instance_types) > 0 &&
+        alltrue([for t in c.node_pool.instance_types : !startswith(t, "ml.")])
+      )
+    ])
+    error_message = "eks_clusters[*].node_pool.instance_types must be a non-empty list of EC2 instance types without the \"ml.\" prefix (e.g. [\"g6e.xlarge\"])."
   }
 }
 
