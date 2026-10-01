@@ -375,23 +375,34 @@ locals {
   # The single instance type a NIM deployment will land on, when one is pinned: exactly
   # one node_selection.instance_types entry, else the cluster's instance_type, else null
   # (family/VRAM-based selection — the type, and so the GPU count, is unknown at plan).
-  eks_nim_pinned_type = {
-    for k, v in var.eks_deployments.nim : k => (
-      v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
-      ? v.node_selection.instance_types[0]
-      : (
-        # cluster-level pin: instance_type, or a node_pool that allows exactly one type
-        try(var.eks_clusters[v.cluster_key].instance_type, null) != null ? var.eks_clusters[v.cluster_key].instance_type : (
-          try(length(local.eks_node_pool[v.cluster_key].instance_types), 0) == 1 ? local.eks_node_pool[v.cluster_key].instance_types[0] : null
-        )
+  # The single instance type a cluster is pinned to: its instance_type, or a node_pool that
+  # allows exactly one type; null when the cluster can use several (type/GPU count unknown).
+  eks_cluster_pinned_type = {
+    for k, c in var.eks_clusters : k => (
+      c.instance_type != null ? c.instance_type : (
+        try(length(c.node_pool.instance_types), 0) == 1 ? c.node_pool.instance_types[0] : null
       )
     )
   }
 
+  eks_nim_pinned_type = {
+    for k, v in var.eks_deployments.nim : k => (
+      v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
+      ? v.node_selection.instance_types[0]
+      : local.eks_cluster_pinned_type[v.cluster_key]
+    )
+  }
+
   # open_weight has no node_selection yet — explicit gpu_count or fallback 1.
+  # Resolution: explicit gpu_count, else the GPU count of the cluster's pinned instance type
+  # (instance_type, or a node_pool allowing exactly one type), else 1.
   eks_ow_gpu_count = {
     for k, v in var.eks_deployments.open_weight :
-    k => coalesce(v.gpu_count, 1)
+    k => coalesce(
+      v.gpu_count,
+      local.eks_cluster_pinned_type[v.cluster_key] != null ? try(local.instance_gpu_count[local.eks_cluster_pinned_type[v.cluster_key]], null) : null,
+      1
+    )
   }
 
   # --- EKS GPU NodePool manifest (per cluster) ---

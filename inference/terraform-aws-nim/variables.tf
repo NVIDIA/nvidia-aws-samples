@@ -474,9 +474,11 @@ variable "eks_clusters" {
     Map of EKS clusters to create. Keys are user-defined cluster labels referenced
     by eks_deployments[*].cluster_key. Empty map (default) creates no EKS resources.
 
-    Each entry provisions an EKS Auto Mode cluster scoped to a single VPC and GPU
-    instance type. Multiple entries allow different GPU families (e.g. g6e vs p5) or
-    different VPCs to coexist in a single module call.
+    Each entry provisions an EKS Auto Mode cluster scoped to a single VPC, with a
+    configurable GPU NodePool: pin one instance type (instance_type), or allow several
+    exact types and/or whole families with VRAM bounds (node_pool). Multiple entries
+    allow different GPU families (e.g. g6e vs p5) or different VPCs to coexist in a
+    single module call.
 
     Key naming: letters, numbers, and hyphens only.
 
@@ -948,8 +950,8 @@ variable "eks_deployments" {
       for k, v in var.eks_deployments.nim :
       (v.node_selection == null || v.node_selection.use_reserved_first != true) ? true : (
         contains(keys(var.eks_clusters), v.cluster_key) && (
-          length(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_ids) > 0 ||
-          length(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_tags) > 0
+          length(try(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_ids, [])) > 0 ||
+          length(try(var.eks_clusters[v.cluster_key].node_pool.capacity_reservation_tags, {})) > 0
         )
       )
     ])

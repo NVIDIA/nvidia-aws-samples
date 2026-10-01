@@ -347,3 +347,33 @@ run "node_pool_instance_types_rejects_ml_prefix" {
 
   expect_failures = [var.eks_clusters]
 }
+
+# use_reserved_first on a cluster with no node_pool (only instance_type) must fail with the
+# intended validation message, not an attribute-on-null error.
+run "use_reserved_first_without_node_pool_rejected_cleanly" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        instance_type      = "g6e.xlarge"
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { use_reserved_first = true, instance_types = ["g6e.xlarge"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [var.eks_deployments]
+}
