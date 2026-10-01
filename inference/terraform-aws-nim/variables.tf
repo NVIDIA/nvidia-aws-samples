@@ -443,7 +443,7 @@ variable "eks_clusters" {
       instance_types            = optional(list(string))     # exact types, e.g. ["g6e.xlarge","g6e.2xlarge"]; null = any
       min_gpu_memory_gib        = optional(number)           # cluster-wide VRAM floor
       max_gpu_memory_gib        = optional(number)           # cluster-wide VRAM ceiling (cost guard)
-      max_gpus                  = optional(number, 100)      # NodePool GPU limit = hard spend cap
+      max_gpus                  = optional(number, 100)      # NodePool GPU-count limit (not a $ cap)
       capacity_reservation_ids  = optional(list(string), []) # ODCR / Capacity Block IDs → used first
       capacity_reservation_tags = optional(map(string), {})  # select reservations by tag
     }), null)
@@ -507,7 +507,8 @@ variable "eks_clusters" {
                                                               (e.g. ["g6e","g7e"]); null = any.
                                   min/max_gpu_memory_gib    — cluster-wide VRAM floor/ceiling
                                                               (the ceiling is a cost guard).
-                                  max_gpus                  — NodePool GPU limit = hard spend cap.
+                                  max_gpus                  — NodePool GPU-count limit: the most GPUs the pool will
+                                                          provision at once. It bounds capacity, not charges.
                                   capacity_reservation_ids/_tags — ODCR / Capacity Block for ML
                                                               selectors; reserved capacity is used
                                                               first. See "Capacity" in the README.
