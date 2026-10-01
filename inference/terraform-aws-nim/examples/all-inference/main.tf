@@ -71,6 +71,9 @@ module "terraform-aws-nim" {
         enable_model_profile_cache = true
         helm_chart_version         = "2.0.3"
 
+        # Cache is built for one GPU, so pin exactly one instance type (module-enforced).
+        node_selection = { instance_types = ["g6e.xlarge"] }
+
         # Restrict internet-facing NLB to the deployer's IP.
         nlb_allowed_cidr_blocks = ["${chomp(data.http.my_ip.response_body)}/32"]
       }

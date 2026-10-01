@@ -209,6 +209,11 @@ fi
 HEALTH_PATH="${NIM_HEALTH_PATH:-/v1/health/ready}"
 INFER_PATH="${NIM_INFER_PATH:-/v1/chat/completions}"
 
+# Escape sed-replacement metacharacters (\\, &, |) so a path containing them is literal.
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+HEALTH_PATH=$(sed_escape "$HEALTH_PATH")
+INFER_PATH=$(sed_escape "$INFER_PATH")
+
 CONFIG_FILE=$(mktemp)
 cat "$CONFIG_FILE_PATH" | sed "s/\${PORT}/$PORT/g; s/\${BACKEND_PORT}/$BACKEND_PORT/g; s|\${HEALTH_PATH}|$HEALTH_PATH|g; s|\${INFER_PATH}|$INFER_PATH|g" > $CONFIG_FILE
 

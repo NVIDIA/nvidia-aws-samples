@@ -12,7 +12,7 @@ underlying AWS infrastructure (EKS Auto Mode, SageMaker, networking, image sync)
 
 - [`nvidia-cosmos-on-aws/`](nvidia-cosmos-on-aws/) — Deploy the **NVIDIA Cosmos 3
   Generator** world foundation model (text or image → generated video) on AWS,
-  with **EKS** (Helm, synchronous HTTP `POST /v1/infer`) and **SageMaker async**
+  with **EKS** (raw manifest, synchronous HTTP `POST /v1/infer`) and **SageMaker async**
   (Caddy shim, S3-backed) variants. Cosmos 3 is a Mixture-of-Transformer world
   model; this sample deploys the Generator tower. Requires P5/P6
   (H100/H200/Blackwell) GPUs.

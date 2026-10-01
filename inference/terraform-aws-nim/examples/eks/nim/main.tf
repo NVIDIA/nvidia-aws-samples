@@ -37,14 +37,13 @@ module "terraform-aws-nim" {
         enable_model_profile_cache = true
         helm_chart_version         = "2.0.3"
 
-        # node_selection = this NIM's VRAM floor (~16 GB weights + KV headroom). Note
-        # the cluster node_pool is pinned to one family (g6e) BECAUSE
-        # enable_model_profile_cache pre-builds the profile for a SPECIFIC GPU — a
-        # multi-family pool would make the cached profile ambiguous. This NIM's own
-        # supported families are g5/g6e (A10G/L40S) per its support matrix, so drop the
-        # cache and widen node_pool to ["g5","g6e"] for the multi-family pattern. For
-        # the full "let Karpenter pick the cheapest" demo, see examples/eks/open-weight.
-        node_selection = { min_gpu_memory_gib = 20 }
+        # node_selection pins ONE instance type because enable_model_profile_cache
+        # pre-builds the NIM profile for a SPECIFIC GPU (the module requires exactly one
+        # instance_types entry when the cache is on). L40S (g6e.xlarge, 48 GB) comfortably
+        # fits this NIM (~16 GB weights + KV headroom). For the multi-family "let Karpenter
+        # pick the cheapest" pattern, drop the cache and use families / a VRAM floor
+        # instead — see examples/eks/open-weight.
+        node_selection = { instance_types = ["g6e.xlarge"] }
 
         # Restrict the internet-facing NLB to the deployer's IP (module validation
         # requires this when load_balancer_internal = false).

@@ -840,6 +840,27 @@ variable "eks_deployments" {
     error_message = "eks_deployments.nim: port must be null (use default) or a valid TCP port (1-65535)."
   }
 
+  # The profile cache is built for ONE specific GPU (NIM profiles are GPU-specific), taken
+  # from node_selection.instance_types[0]. Without exactly one pinned type the cache build
+  # runs with an empty INSTANCE_TYPE and may pick a generic/wrong profile.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim :
+      !(v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)) ||
+      length(try(v.node_selection.instance_types, null) == null ? [] : v.node_selection.instance_types) == 1
+    ])
+    error_message = "eks_deployments.nim: enable_model_profile_cache = true (llm/embedding) requires node_selection.instance_types to contain exactly one instance type (e.g. [\"g6e.xlarge\"]) — the cache is built for that GPU. Pin one type or disable the cache."
+  }
+
+  # NGC_API_KEY is supplied from the secret-backed env entry; letting callers set it via
+  # env would duplicate the variable and put a plaintext value in the manifest.
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim : !contains(keys(v.env), "NGC_API_KEY")
+    ])
+    error_message = "eks_deployments.nim: env must not set NGC_API_KEY (reserved; supplied from ngc_credentials)."
+  }
+
   # Force an explicit network-access posture on internet-facing NIM NLBs. The k8s Service
   # loadBalancerSourceRanges field wires directly into the NLB security group; leaving it
   # unset means the NLB accepts inference requests from 0.0.0.0/0. Refusing that combo at

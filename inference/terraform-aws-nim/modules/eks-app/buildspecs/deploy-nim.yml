@@ -416,6 +416,7 @@ phases:
             if [ -n "${EXTRA_ENV}" ]; then
               HTTP_EXTRA_ENV=$(echo "${EXTRA_ENV}" | while IFS='=' read -r ek ev; do
                 [ -z "$ek" ] && continue
+                ev=$(printf '%s' "$ev" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
                 printf '            - name: %s\n              value: "%s"\n' "$ek" "$ev"
               done)
             fi
@@ -427,6 +428,9 @@ phases:
         metadata:
           name: ${RELEASE_NAME}
           namespace: ${NAMESPACE}
+          labels:
+            app: ${RELEASE_NAME}
+            app.kubernetes.io/instance: ${RELEASE_NAME}
         spec:
           progressDeadlineSeconds: 3600
           replicas: ${REPLICAS}
@@ -632,6 +636,14 @@ phases:
               touch /tmp/nim-values.yaml
               ;;
           esac
+
+          # node_selection → chart-level `affinity` value (pod-spec affinity; supported by the
+          # NGC NIM charts). The raw-manifest paths inject the same block directly. Appended
+          # before the S3 cache block and before helm_values_override (-f), so a user-supplied
+          # affinity in the override still wins. NODE_AFFINITY_YAML is 6-space indented.
+          if [ -n "${NODE_AFFINITY_YAML}" ]; then
+            printf '%s\n' "${NODE_AFFINITY_YAML}" | sed 's/^      //' >> /tmp/nim-values.yaml
+          fi
 
           # S3 cache sync init container (llm/embedding only). Charts already
           # define a model-store emptyDir at /model-store — mount the same.

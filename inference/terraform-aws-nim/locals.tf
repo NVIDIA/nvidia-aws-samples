@@ -411,8 +411,11 @@ locals {
       ] : [],
     )
   }
-  # Custom NodeClass, only when reservations are configured. Minimal spec — EKS Auto Mode
-  # supplies role/subnet/SG defaults. WARNING (per AWS docs): setting
+  # Custom NodeClass, only when reservations are configured. A custom NodeClass does NOT
+  # inherit the "default" NodeClass's role/subnets/SGs, so they are set explicitly: the
+  # cluster's node role (named in eks-infra iam.tf), its private subnets, and the cluster
+  # security group (selected by the aws:eks:cluster-name tag EKS puts on it).
+  # WARNING (per AWS docs): setting
   # capacityReservationSelectorTerms on ANY NodeClass stops Auto Mode from auto-using open
   # ODCRs cluster-wide, so reserved capacity must be explicitly selected from then on.
   eks_nodeclass_manifest = {
@@ -421,6 +424,9 @@ locals {
       kind       = "NodeClass"
       metadata   = { name = "${local.name_prefix}-${k}-gpu-nc" }
       spec = {
+        role                       = "${local.name_prefix}-${k}-eks-node"
+        subnetSelectorTerms        = [for id in c.private_subnet_ids : { id = id }]
+        securityGroupSelectorTerms = [{ tags = { "aws:eks:cluster-name" = "${local.name_prefix}-${k}" } }]
         capacityReservationSelectorTerms = concat(
           [for id in c.node_pool.capacity_reservation_ids : { id = id }],
           length(c.node_pool.capacity_reservation_tags) > 0 ? [{ tags = c.node_pool.capacity_reservation_tags }] : []
