@@ -16,10 +16,6 @@ underlying AWS infrastructure (EKS Auto Mode, SageMaker, networking, image sync)
   (Caddy shim, S3-backed) variants. Cosmos 3 is a Mixture-of-Transformer world
   model; this sample deploys the Generator tower. Requires P5/P6
   (H100/H200/Blackwell) GPUs.
-- [`nvidia-alpamayo-on-aws/`](nvidia-alpamayo-on-aws/) — Deploy **NVIDIA Alpamayo**,
-  a vision-language model on the Cosmos-Reason backbone, RL post-trained for
-  autonomous driving (multi-camera images + egomotion + navigation prompt →
-  driving trajectory). EKS and SageMaker example variants.
 
 ## Requirements
 
