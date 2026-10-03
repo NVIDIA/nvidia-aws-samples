@@ -210,10 +210,11 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = base64encode(var.node_affinity_yaml)
     }
     environment_variable {
-      # Newline-separated KEY=VALUE; the raw-manifest path emits each as a
-      # container env entry. Empty when no extra env is set.
+      # Newline-separated KEY=<base64 value>: base64 keeps a value that contains
+      # newlines or "=" from being mistaken for another entry. The raw-manifest
+      # paths decode and emit each as a container env entry. Empty when none.
       name  = "EXTRA_ENV"
-      value = join("\n", [for k, v in var.env : "${k}=${v}"])
+      value = join("\n", [for k, v in var.env : "${k}=${base64encode(v)}"])
     }
     environment_variable {
       name  = "GPU_COUNT"
@@ -329,7 +330,7 @@ resource "terraform_data" "deploy_trigger" {
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
       manifest_patch             = var.manifest_patch != null ? var.manifest_patch : ""
       node_affinity_yaml         = var.node_affinity_yaml
-      env                        = join("\n", [for k, v in var.env : "${k}=${v}"])
+      env                        = jsonencode(var.env)
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas
       load_balancer_internal     = var.load_balancer_internal

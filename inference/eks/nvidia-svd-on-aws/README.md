@@ -226,7 +226,7 @@ Send sustained gRPC inference traffic (multiple parallel `synthetic-video-detect
 
 > **Status (2026-07-16):** **Live.** End-to-end validated on g4dn.2xlarge (T4) — bundled SVD sample scored 99.41% SYNTHETIC in ~24s. Pod autoscaling verified 1↔2 under sustained load with zero probe-timeout restarts.
 
-One `terraform apply` provisions VPC + related networking components (or refs existing ones you supply) + EKS Auto Mode cluster + GPU NodePool + ECR mirror + NGC pull secret + SVD `Deployment` (raw kubectl, `nim_type = "custom"`) + gRPC-enabled `Service` backed by an NLB. Sourced from the bundled `terraform-aws-nim` module under [`modules/`](modules/). Eventually this module will be publicly available, but in the meantime it is supplied locally here for your convenience.
+One `terraform apply` provisions VPC + related networking components (or refs existing ones you supply) + EKS Auto Mode cluster + GPU NodePool + ECR mirror + NGC pull secret + SVD `Deployment` (raw kubectl, `nim_type = "custom"`) + gRPC-enabled `Service` backed by an NLB. Sourced from the [`terraform-aws-nim`](../../terraform-aws-nim/) module in this repository (pulled via `git::…//inference/terraform-aws-nim?ref=main`).
 
 Wall-clock: **~20 min** first apply (cluster ~15-20 min, image sync + cluster setup concurrent, deploy + cold start ~10-15 min, mostly parallel).
 

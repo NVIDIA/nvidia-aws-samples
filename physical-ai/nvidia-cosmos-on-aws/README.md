@@ -136,8 +136,12 @@ sequenceDiagram
 ## Instance selection
 
 Cosmos 3 Generator requires **Hopper architecture or newer (CC ≥ 9.0)** and, per
-NVIDIA's [support matrix](https://docs.nvidia.com/nim/cosmos/latest/support-matrix.html),
-a **minimum per-device VRAM** — an architecture floor, not just a memory floor:
+NVIDIA's [support matrix](https://docs.nvidia.com/nim/cosmos/latest/support-matrix.html)
+(the version of that page last updated Jul 2026), a **minimum per-device VRAM** — an
+architecture floor, not just a memory floor. The requirements and tables below follow that page;
+NVIDIA's documentation for a specific image tag (this sample pins `cosmos3:2.0.0`) can list
+broader support, so check it for your tag. The instance families the sample allows are
+**sample choices** (they keep it on validated SKUs), not hard limits of the NIM:
 
 | Tier | Min VRAM / device | Fits single GPU? |
 |------|-------------------|------------------|
@@ -174,8 +178,7 @@ eks_deployments = { nim = { cosmos3 = { node_selection = { min_gpu_memory_gib = 
 Pin exactly instead with `node_selection = { instance_types = ["g7e.2xlarge"] }`. For the
 super (32B) tier, raise `min_gpu_memory_gib` (121 for fp8 → H200/B200, 150 for bf16 → B200)
 and/or set `gpu_count > 1` (tensor-parallel) — the `p5`/`p5en`/`p6-b200` families are already
-allow-listed, so there's nothing to add;
-parallel). See the module README's [GPU node selection](../../inference/terraform-aws-nim/README.md#gpu-node-selection)
+allow-listed, so there's nothing to add. See the module README's [GPU node selection](../../inference/terraform-aws-nim/README.md#gpu-node-selection)
 for the full knob set (VRAM band, denylist, capacity reservations, cost caps).
 
 **Reasoner sizing** (separate `cosmos3-reasoner` NIM): the ~8B VLM runs on an **L40S (48 GB,
@@ -226,9 +229,10 @@ them as a starting point and benchmark your own params.
 ## Deploy
 
 ```bash
-cd examples/eks/nim
-cp terraform.tfvars.example terraform.tfvars   # set ngc_secret_name (standard nvapi-* key)
-terraform init && terraform apply
+# Run from the sample root (nvidia-cosmos-on-aws/); later commands use the same -chdir base.
+cp examples/eks/nim/terraform.tfvars.example examples/eks/nim/terraform.tfvars   # set ngc_secret_name (standard nvapi-* key)
+terraform -chdir=examples/eks/nim init
+terraform -chdir=examples/eks/nim apply
 ```
 
 First apply is ~20 min (cluster + GPU node + image sync, mostly parallel). The pod

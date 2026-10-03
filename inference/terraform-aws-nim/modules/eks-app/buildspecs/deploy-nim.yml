@@ -124,6 +124,20 @@ phases:
       # Open-weight: raw kubectl Deployment+Service. Init syncs weights from
       # S3; main runs vllm serve. NIM path is the Helm flow below.
       - |
+        # Caller-supplied extra env (EXTRA_ENV = newline-separated KEY=<base64 value>) rendered as
+        # container env entries for the raw-manifest Deployments (gRPC and HTTP no-chart). Values
+        # are base64 so a value containing newlines or "=" cannot be mistaken for another entry;
+        # each is YAML-escaped (backslash, double quote) and newlines become \n escapes.
+        HTTP_EXTRA_ENV=""
+        if [ -n "${EXTRA_ENV}" ]; then
+          HTTP_EXTRA_ENV=$(echo "${EXTRA_ENV}" | while IFS= read -r line; do
+            # Split on the FIRST "=" only: base64 values end in "=" padding.
+            ek="${line%%=*}"; ev64="${line#*=}"
+            [ -z "$ek" ] && continue
+            ev=$(printf '%s' "$ev64" | base64 -d | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "%s", "\\n"} {printf "%s", $0}')
+            printf '            - name: %s\n              value: "%s"\n' "$ek" "$ev"
+          done)
+        fi
         if [ -n "${MODEL_ID}" ]; then
           # Additional init container YAML for heredoc injection.
           OW_ADDITIONAL_INIT_CONTAINERS=""
@@ -308,6 +322,7 @@ phases:
                         secretKeyRef:
                           name: ngc-api-key
                           key: NGC_API_KEY
+        ${HTTP_EXTRA_ENV}
                   ports:
                     - name: grpc
                       containerPort: ${PORT}
@@ -382,6 +397,13 @@ phases:
 
             # Affinity is baked into the manifest above (no post-apply patch → no rollover).
             kubectl apply -f /tmp/grpc-nim-manifest.yaml
+
+            if [ -n "${MANIFEST_PATCH}" ]; then
+              echo "Applying manifest_patch to deployment ${RELEASE_NAME}"
+              printf '%s' "${MANIFEST_PATCH}" > /tmp/manifest-patch.yaml
+              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/manifest-patch.yaml
+            fi
+
             kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
 
           elif [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; then
@@ -408,16 +430,6 @@ phases:
                 printf '            - name: AWS_DEFAULT_REGION\n'
                 printf '              value: "%s"\n' "${AWS_REGION}"
                 i=$((i + 1))
-              done)
-            fi
-
-            # Caller-supplied extra env (EXTRA_ENV = newline-separated KEY=VALUE).
-            HTTP_EXTRA_ENV=""
-            if [ -n "${EXTRA_ENV}" ]; then
-              HTTP_EXTRA_ENV=$(echo "${EXTRA_ENV}" | while IFS='=' read -r ek ev; do
-                [ -z "$ek" ] && continue
-                ev=$(printf '%s' "$ev" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-                printf '            - name: %s\n              value: "%s"\n' "$ek" "$ev"
               done)
             fi
 

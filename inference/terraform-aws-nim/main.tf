@@ -66,6 +66,26 @@ resource "terraform_data" "validation" {
       error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its pinned instance type provides. Reduce gpu_count, or pin an instance type with more GPUs."
     }
 
+    # node_selection.instance_types must be allowed by the cluster's GPU pool, otherwise the
+    # pod can never schedule (Karpenter only launches what the NodePool allows) and the GPU
+    # count / profile cache would be computed for a type that never runs.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        v.node_selection == null || v.node_selection.instance_types == null || (
+          var.eks_clusters[v.cluster_key].instance_type != null
+          ? alltrue([for it in v.node_selection.instance_types : it == var.eks_clusters[v.cluster_key].instance_type])
+          : (
+            var.eks_clusters[v.cluster_key].node_pool == null ? true : (
+              (var.eks_clusters[v.cluster_key].node_pool.instance_types == null || alltrue([for it in v.node_selection.instance_types : contains(var.eks_clusters[v.cluster_key].node_pool.instance_types, it)]))
+              && (var.eks_clusters[v.cluster_key].node_pool.instance_families == null || alltrue([for it in v.node_selection.instance_types : contains(var.eks_clusters[v.cluster_key].node_pool.instance_families, split(".", it)[0])]))
+            )
+          )
+        )
+      ])
+      error_message = "An eks_deployments.nim entry's node_selection.instance_types names a type that its cluster does not allow. It must equal the cluster's instance_type, or be in the cluster node_pool's instance_types / belong to one of its instance_families — otherwise the pod stays Pending."
+    }
+
     # The model profile cache is built for ONE specific GPU (NIM profiles are
     # GPU-specific). Require a pinned instance type — a single
     # node_selection.instance_types entry, or the cluster's instance_type.

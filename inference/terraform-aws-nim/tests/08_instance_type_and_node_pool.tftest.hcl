@@ -377,3 +377,174 @@ run "use_reserved_first_without_node_pool_rejected_cleanly" {
 
   expect_failures = [var.eks_deployments]
 }
+
+# node_selection.instance_types must be allowed by the cluster: a type outside the cluster's
+# node_pool families can never schedule, so it is rejected at plan time.
+run "node_selection_type_outside_cluster_families_rejected" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_families = ["g5"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_types = ["g6e.xlarge"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+run "node_selection_type_outside_cluster_type_list_rejected" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["g6e.xlarge"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_types = ["g6e.2xlarge"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+run "node_selection_type_differs_from_cluster_instance_type_rejected" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        instance_type      = "g6e.xlarge"
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_types = ["g6e.2xlarge"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+# Allowed combinations plan: a type inside the cluster's families, and the cluster's own type.
+run "node_selection_type_inside_cluster_pool_ok" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_families = ["g6e", "g7e"], instance_types = null }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key                = "gpu"
+          source_image_uri           = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version         = "1.0.0"
+          nlb_allowed_cidr_blocks    = ["10.0.0.0/8"]
+          enable_model_profile_cache = true
+          node_selection             = { instance_types = ["g6e.xlarge"] }
+        }
+      }
+    }
+  }
+}
+
+# env keys become environment variable names: reject keys that aren't valid names; values may
+# contain newlines and "=" (they are framed as base64 on the way to CodeBuild).
+run "env_key_must_be_a_valid_name" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        instance_type      = "g6e.xlarge"
+      }
+    }
+    eks_deployments = {
+      nim = {
+        custom = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/nvidia/example:1.0.0"
+          nim_type                = "custom"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          env                     = { "BAD=KEY" = "x" }
+        }
+      }
+    }
+  }
+
+  expect_failures = [var.eks_deployments]
+}
+
+run "env_value_with_newline_and_equals_ok" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        instance_type      = "g6e.xlarge"
+      }
+    }
+    eks_deployments = {
+      nim = {
+        custom = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/nvidia/example:1.0.0"
+          nim_type                = "custom"
+          protocol                = "grpc"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          env                     = { A = "x\nB=y", C = "a=b" }
+        }
+      }
+    }
+  }
+}

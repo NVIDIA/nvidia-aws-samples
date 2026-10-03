@@ -10,10 +10,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 module "terraform-aws-nim" {
-  # Local relative source during development so this example tests against local
-  # terraform-aws-nim edits (not the published module). Before publishing, switch back to:
-  #   source = "git::https://github.com/NVIDIA/nvidia-aws-samples.git//inference/terraform-aws-nim?ref=main"
-  source = "../../terraform-aws-nim"
+  # Published module. To test local terraform-aws-nim edits instead, temporarily use:
+  #   source = "../../terraform-aws-nim"
+  source = "git::https://github.com/NVIDIA/nvidia-aws-samples.git//inference/terraform-aws-nim?ref=main"
 
   project_prefix = "svd"
   environment    = "dev"

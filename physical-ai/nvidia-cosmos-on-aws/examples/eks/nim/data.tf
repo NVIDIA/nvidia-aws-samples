@@ -9,7 +9,7 @@ data "aws_availability_zones" "available" {
 # does not evaluate — so `terraform plan` succeeds without a Secrets Manager
 # secret pre-existing in the account.
 data "aws_secretsmanager_secret" "ngc" {
-  count = var.ngc_secret_name != null ? 1 : 0
+  count = try(trimspace(var.ngc_secret_name), "") != "" ? 1 : 0
   name  = var.ngc_secret_name
 }
 

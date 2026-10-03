@@ -878,6 +878,14 @@ variable "eks_deployments" {
     error_message = "eks_deployments.nim: port must be null (use default) or a valid TCP port (1-65535)."
   }
 
+  # env keys become container env var names (and are framed as KEY=<base64> for CodeBuild).
+  validation {
+    condition = alltrue([
+      for k, v in var.eks_deployments.nim : alltrue([for ek, ev in v.env : can(regex("^[A-Za-z_][A-Za-z0-9_]*$", ek))])
+    ])
+    error_message = "eks_deployments.nim: env keys must be valid environment variable names (letters, digits and underscore; not starting with a digit)."
+  }
+
   # NGC_API_KEY is supplied from the secret-backed env entry; letting callers set it via
   # env would duplicate the variable and put a plaintext value in the manifest.
   validation {

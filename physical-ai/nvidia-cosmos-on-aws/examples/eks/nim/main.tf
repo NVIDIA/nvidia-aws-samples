@@ -29,7 +29,7 @@ module "terraform-aws-nim" {
   # Path B (inline api_key, dev-only) when ngc_api_key is set. Exactly one is required.
   # The image is public GA (nvcr.io/nim/nvidia/cosmos3), so a standard nvapi-* NGC
   # key works. CodeBuild pulls the image with it.
-  ngc_credentials = var.ngc_secret_name != null ? {
+  ngc_credentials = try(trimspace(var.ngc_secret_name), "") != "" ? {
     secret_arn      = data.aws_secretsmanager_secret.ngc[0].arn
     secret_json_key = "access-key"
     } : {
