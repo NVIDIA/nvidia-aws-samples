@@ -76,7 +76,7 @@ Pick by deployment count, not just model size:
 
 All examples ship configured for **[`nvidia/Llama-3.1-Nemotron-Nano-8B-v1`](https://build.nvidia.com/nvidia/llama-3_1-nemotron-nano-8b-v1)** —
 NVIDIA's instruction-tuned fine-tune of Llama-3.1-8B. NIM image:
-`nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest`. HuggingFace ID (open-weight path):
+`nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:1.8.4`. HuggingFace ID (open-weight path):
 `nvidia/Llama-3.1-Nemotron-Nano-8B-v1`.
 
 The model is generic — the module is image-agnostic — so customers will swap it for whatever
@@ -600,7 +600,7 @@ eks_deployments = {
   nim = {
     llama = {
       cluster_key      = "gpu-cluster"
-      source_image_uri = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
+      source_image_uri = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:1.8.4"
       replicas         = 1                # initial replica count; KEDA takes over from here
       autoscaling = {
         min_replicas = 1

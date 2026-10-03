@@ -18,7 +18,7 @@ module "terraform-aws-nim" {
     nim = {
       # NIM — pre-optimized NGC container, automatic GPU profile selection
       llama-nemotron-nano-8b = {
-        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
+        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:1.8.4"
         instance_type              = "ml.g6e.xlarge"
         endpoint_type              = "realtime"
         enable_model_profile_cache = true
@@ -67,7 +67,7 @@ module "terraform-aws-nim" {
       # NIM path — NGC container image, Helm deploy
       llama-nemotron-nano-8b = {
         cluster_key                = "llama-nemotron-nano-8b"
-        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
+        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:1.8.4"
         enable_model_profile_cache = true
         helm_chart_version         = "2.0.3"
 
