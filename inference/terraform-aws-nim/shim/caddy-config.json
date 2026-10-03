@@ -44,7 +44,7 @@
                         },
                         {
                           "handler": "rewrite",
-                          "uri": "/v1/chat/completions{uri}"
+                          "uri": "${INFER_PATH}{uri}"
                         },
                         {
                           "handler": "reverse_proxy",

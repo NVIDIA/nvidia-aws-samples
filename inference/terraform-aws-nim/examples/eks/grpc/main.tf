@@ -15,13 +15,13 @@ module "terraform-aws-nim" {
       vpc_id             = aws_vpc.main.id
       private_subnet_ids = aws_subnet.private[*].id
       public_subnet_ids  = aws_subnet.public[*].id
-      # g4dn.2xlarge = T4 (16GB VRAM), 8 vCPU, 32 GB RAM. Meets SVD's minimums
-      # per NVIDIA support matrix (T4 explicitly listed; NVENC/NVDEC present).
-      # ~3x cheaper than g6e.2xlarge on-demand + best availability of any GPU
-      # family in us-east-1 (g4dn = 2019, least contested capacity pool).
-      # Tradeoff: T4 ~5x slower per video than L40S; acceptable for bursty POC,
-      # not for latency-critical prod.
-      instance_type           = "g4dn.2xlarge"
+      # GPU allow-list = SVD's support matrix (Tensor cores + NVENC/NVDEC hardware):
+      # T4 / A10G / L4 / L40S. Karpenter picks the cheapest with capacity — typically
+      # g4dn (T4, 16 GB), ~3x cheaper than g6e and the least-contested GPU pool in
+      # us-east-1 (g4dn = 2019). H100/A100 are architecture-excluded (no NVENC/NVDEC),
+      # so no p-family here. Tradeoff: T4 ~5x slower per video than L40S — fine for a
+      # bursty POC, not for latency-critical prod.
+      node_pool               = { instance_families = ["g4dn", "g5", "g6", "g6e"] }
       endpoint_public_access  = true
       endpoint_private_access = true
       public_access_cidrs     = ["${chomp(data.http.my_ip.response_body)}/32"]

@@ -78,12 +78,23 @@ Source: [Maxine SVD Support Matrix](https://docs.nvidia.com/nim/maxine/synthetic
 | p4d / p4de      | A100      | Ampere | 40/80 GB  | —             | **Not supported** (no NVENC/NVDEC) |
 | p5 / p5e / p5en | H100/H200 | Hopper | 80/141 GB | —             | **Not supported** (no NVENC/NVDEC) |
 
+### How the module selects an instance
+
+This example does not pin a single instance type. It hands Karpenter an allow-list of GPU families plus a VRAM floor and lets Karpenter pick the cheapest eligible family that has capacity. Two independent gates, set in [`main.tf`](main.tf):
+
+- **`node_pool.instance_families` — the architecture / support-matrix gate.** Set at the cluster level to `["g4dn", "g5", "g6", "g6e"]` — the AWS families whose GPUs (T4 / A10G / L4 / L40S) have the NVENC/NVDEC engines SVD v1 requires. This deliberately excludes the A100/H100/B100 datacenter families (p4d/p5/…). SVD v2 adds datacenter-GPU support, at which point you would append `p4d`/`p5`/`p5e`/`p6`.
+- **`node_selection.min_gpu_memory_gib = 15` — the VRAM floor / capacity gate.** Set on the SVD deployment and rendered into the pod's `nodeAffinity` at deploy time. T4's 16 GB clears the 15 GB floor, so all four families stay eligible.
+
+With both gates satisfied, **Karpenter provisions the cheapest eligible family — `g4dn` (T4) by default** — and falls back across the remaining families automatically when the cheapest is capacity-constrained. To pin a specific GPU, narrow `instance_families` to a single family (e.g. `["g6e"]`), or raise `min_gpu_memory_gib` to exclude smaller-VRAM families.
+
 ### Recommended ordering for the POC
 
-1. **g4dn.2xlarge** (1× T4, 16 GB) — **default recommendation.** Cheapest supported, most available on-demand in us-east-1, verified end-to-end with this module. ~24s per sample video (~5x slower than L40S). If your per-video latency budget allows, start here.
+Karpenter picks automatically (cheapest-eligible-first) given the allow-list above; this ordering is the rationale behind that default and what to expect if you narrow the allow-list to force a specific family:
+
+1. **g4dn.2xlarge** (1× T4, 16 GB) — **the default Karpenter lands on.** Cheapest supported, most available on-demand in us-east-1, verified end-to-end with this module. ~24s per sample video (~5x slower than L40S). If your per-video latency budget allows, stay here.
 2. **g5.2xlarge** (1× A10G, 24 GB) — Ampere; ~30% cheaper than g6e, broader availability than g6.
 3. **g6.2xlarge** (1× L4, 24 GB) — same Ada arch as L40S, closest performance profile at lower cost.
-4. **g6e.2xlarge** (1× L40S, 48 GB) — highest throughput, matches SageMaker `ml.g6e.2xlarge` for apples-to-apples comparison. Verify AWS capacity in your target region first.
+4. **g6e.2xlarge** (1× L40S, 48 GB) — highest throughput, matches SageMaker `ml.g6e.2xlarge` for apples-to-apples comparison. Narrow `instance_families` to `["g6e"]` to force it; verify AWS capacity in your target region first.
 
 ### Why not p-family
 
@@ -97,13 +108,13 @@ SVD uses GPU-accelerated H.264 decoding via NVDEC. A100 / H100 / B100 are datace
 
 Source: [AWS Containers Blog: Bottlerocket NVIDIA](https://aws.amazon.com/blogs/containers/bottlerocket-support-for-nvidia-gpus/), [Bottlerocket #4441](https://github.com/bottlerocket-os/bottlerocket/issues/4441).
 
-**EKS-managed node groups with EKS-optimized accelerated AMI** — latest AL2023 release `amazon-eks-node-al2023-x86_64-nvidia-1.36-v20260523` (May 26 2026) ships **NVIDIA driver 580.159.03** and **NVIDIA Container Toolkit 1.19.1-1**.
+**EKS-managed node groups with EKS-optimized accelerated AMI (alternative — not used here)** — this example runs Auto Mode + Karpenter, not managed node groups. For reference, the latest AL2023 accelerated AMI release `amazon-eks-node-al2023-x86_64-nvidia-1.36-v20260523` (May 26 2026) ships **NVIDIA driver 580.159.03** and **NVIDIA Container Toolkit 1.19.1-1**, so a managed-node-group deployment would also clear SVD's 571.21+ minimum.
 
 Source: [amazon-eks-ami v20260523](https://github.com/awslabs/amazon-eks-ami/releases).
 
-**One AMI / driver covers all four candidate families** (g4dn / g5 / g6 / g6e). No per-family AMI matrix.
+**One AMI / driver covers all four candidate families** (g4dn / g5 / g6 / g6e). No per-family AMI matrix — on either the Auto Mode Bottlerocket path used here or the managed-node-group path above.
 
-**Edge case:** EKS node groups pinned to custom or stale AMI IDs may ship older drivers. Confirm latest EKS-optimized accelerated AMI or Auto Mode usage at deployment time.
+**Edge case:** managed node groups pinned to custom or stale AMI IDs may ship older drivers. This example's Auto Mode path avoids that by tracking the latest Bottlerocket NVIDIA variant; if you switch to managed node groups, confirm the latest EKS-optimized accelerated AMI at deployment time.
 
 ### SageMaker (not recommended for SVD)
 
@@ -129,7 +140,7 @@ Implications:
 
 - A single SVD process uses 1 GPU regardless of how many the host has.
 - Bigger instances in the same family (e.g. `g6e.12xlarge` with 4× L40S) **don't reduce per-video latency**. They only help if you run multiple replicas per node for concurrent throughput.
-- For most POC topologies (single-replica per node), pick the smallest supported size in your chosen family (e.g. `g4dn.2xlarge`, `g6e.2xlarge`).
+- For most POC topologies (single-replica per node), the smallest supported size in each family is what you want (e.g. `g4dn.2xlarge`, `g6e.2xlarge`). You don't pick this explicitly — Karpenter provisions the smallest instance that satisfies the pod's one-GPU request within the `node_pool` allow-list, defaulting to `g4dn.2xlarge`.
 
 **Concurrent throughput comes from pod autoscaling.** The `terraform-aws-nim` module deploys SVD with a KEDA-driven ScaledObject that scales pods 1→N based on `DCGM_FI_DEV_GPU_UTIL`. Each additional pod lands on its own GPU node via Karpenter, so N concurrent tenants get N parallel streams. Scale-down is 3 min after load subsides (tuned for bursty video workloads). See [Autoscaling](#autoscaling) below.
 
@@ -139,9 +150,9 @@ In order of preference:
 
 > **NOTE**: **AZ mappings vary by account** ([AWS docs](https://docs.aws.amazon.com/ram/latest/userguide/working-with-az-ids.html)) so this module references them via `az_id` which is consistent across accounts, where `az_name` is not.
 
-1. **Diversify AZs within a region** — g6e is available in `us-east-1`, `us-east-2`, `us-west-2`. To ensure a higher chance of procuring an instance, in this module example we leverage **Multi-AZ EKS node group** — spreads across AZs in the region, reduces single-AZ insufficient-capacity failures. Karpenter (within EKS auto mode) will search each of those AZs for capacity matching what is defined in the configuration (e.g. `g6e.2xlarge`).
+1. **Diversify AZs and families within a region** — g6e is available in `us-east-1`, `us-east-2`, `us-west-2`. To ensure a higher chance of procuring an instance, this example uses an **EKS Auto Mode Karpenter `NodePool`** (not a managed EKS node group) that spreads across AZs and spans the full `node_pool` allow-list (`g4dn` / `g5` / `g6` / `g6e`). Karpenter searches each AZ for capacity across that allow-list and provisions whichever supported family has capacity — cheapest first (`g4dn` / T4 by default). This reduces single-AZ, single-family insufficient-capacity failures.
 2. **Switch AWS region** - you may try to deploy in another region which may have more capacity for your desired instance type
-3. **Fall back to g6 / g5 / g4dn for POC** — functionally equivalent; throughput differs.
+3. **Automatic multi-family fallback** — because the allow-list spans `g4dn` / `g5` / `g6` / `g6e`, Karpenter falls back across families on its own when the cheapest is constrained; all four run SVD functionally (throughput differs). No config change needed.
 4. **On-Demand Capacity Reservation (ODCR)** — guaranteed capacity in a specific AZ. [AWS docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html).
 5. **Capacity Blocks for ML** — short-term reserved blocks specifically for ML workloads.
 6. **AWS TAM coordination** — enterprise-support customers have a TAM who can help plan capacity and request ODCR.
@@ -215,7 +226,7 @@ Send sustained gRPC inference traffic (multiple parallel `synthetic-video-detect
 
 > **Status (2026-07-16):** **Live.** End-to-end validated on g4dn.2xlarge (T4) — bundled SVD sample scored 99.41% SYNTHETIC in ~24s. Pod autoscaling verified 1↔2 under sustained load with zero probe-timeout restarts.
 
-One `terraform apply` provisions VPC + related networking components (or refs existing ones you supply) + EKS Auto Mode cluster + GPU NodePool + ECR mirror + NGC pull secret + SVD `Deployment` (Helm) + gRPC-enabled `Service` backed by an NLB. Sourced from the bundled `terraform-aws-nim` module under [`modules/`](modules/). Eventually this module will be publicly available, but in the meantime it is supplied locally here for your convenience.
+One `terraform apply` provisions VPC + related networking components (or refs existing ones you supply) + EKS Auto Mode cluster + GPU NodePool + ECR mirror + NGC pull secret + SVD `Deployment` (raw kubectl, `nim_type = "custom"`) + gRPC-enabled `Service` backed by an NLB. Sourced from the [`terraform-aws-nim`](../../terraform-aws-nim/) module in this repository (pulled via `git::…//inference/terraform-aws-nim?ref=main`).
 
 Wall-clock: **~20 min** first apply (cluster ~15-20 min, image sync + cluster setup concurrent, deploy + cold start ~10-15 min, mostly parallel).
 
@@ -271,7 +282,7 @@ terraform version
      --service-code ec2 --quota-code L-DB2E81BA \
      --region <YOUR_REGION>
    ```
-   Need ≥ 8 vCPU for one `g6e.2xlarge`. Request via Service Quotas console if too low (approval takes ~24 hours).
+   Need ≥ 8 vCPU for one default `g4dn.2xlarge` (also 8 vCPU). The **G and VT** quota covers all four allow-list families (`g4dn` / `g5` / `g6` / `g6e`), so this one increase suffices; only if you narrow the allow-list to `g6e` alone do you need to size specifically for `g6e.2xlarge`. Request via Service Quotas console if too low (approval takes ~24 hours).
 
 #### NGC account + SVD entitlement
 
@@ -584,9 +595,9 @@ Events:
   Warning  FailedScheduling  ...  no instance type has enough resources, requirements=...nvidia.com/gpu:"1"...
 ```
 
-**Cause:** Karpenter cycling through node candidates. Normal for the first ~2-3 min on a fresh cluster as it provisions a g6e.2xlarge instance.
+**Cause:** Karpenter cycling through node candidates. Normal for the first ~2-3 min on a fresh cluster as it provisions the cheapest eligible instance — `g4dn.2xlarge` (T4) by default, given the `node_pool` allow-list and the `min_gpu_memory_gib = 15` floor.
 
-**Fix:** Wait. If still Pending past 5 min, your account has insufficient g6e quota in that region — request a quota increase via Service Quotas, or fall back to `g6.2xlarge` (L4 GPU, slower but more available).
+**Fix:** Wait. If still Pending past 5 min, your account has insufficient **G and VT** vCPU quota in that region for any family in the allow-list — request a quota increase via Service Quotas. Because the allow-list spans `g4dn` / `g5` / `g6` / `g6e`, Karpenter already falls back across families automatically when one is capacity-constrained.
 
 ### Sample video opens as text in QuickTime / "not compatible"
 

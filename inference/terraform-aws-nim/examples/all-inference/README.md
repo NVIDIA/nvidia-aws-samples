@@ -4,10 +4,10 @@ Deploys **NVIDIA Llama-3.1-Nemotron-Nano-8B-v1** across all four inference paths
 
 | Output key | Platform | Path | Source | Instance |
 |------------|----------|------|--------|----------|
-| `llama-nemotron-nano-8b-nim` | SageMaker | NIM | NGC container (`nvcr.io`) | `ml.g6e.12xlarge` ([4× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
-| `llama-nemotron-nano-8b-ow` | SageMaker | Open-weight (vLLM) | HuggingFace weights | `ml.g6e.12xlarge` ([4× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
-| `llama-nemotron-nano-8b-nim` | EKS | NIM via Helm | NGC container (`nvcr.io`) | `g6e.12xlarge` ([4× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
-| `llama-nemotron-nano-8b-ow` | EKS | Open-weight (vLLM) via kubectl | HuggingFace weights | `g6e.12xlarge` ([4× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
+| `llama-nemotron-nano-8b-nim` | SageMaker | NIM | NGC container (`nvcr.io`) | `ml.g6e.xlarge` ([1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
+| `llama-nemotron-nano-8b-ow` | SageMaker | Open-weight (vLLM) | HuggingFace weights | `ml.g6e.xlarge` ([1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
+| `llama-nemotron-nano-8b-nim` | EKS | NIM via Helm | NGC container (`nvcr.io`) | Karpenter-selected `g6e` (xlarge-class, [1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
+| `llama-nemotron-nano-8b-ow` | EKS | Open-weight (vLLM) via kubectl | HuggingFace weights | Karpenter-selected `g6e` (xlarge-class, [1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/)) |
 
 The NIM paths use NGC's pre-optimized container with automatic GPU profile selection.
 The open-weight paths download raw HuggingFace weights to S3 and serve them via vLLM.
@@ -37,8 +37,8 @@ plaintext secret in AWS Secrets Manager and set `ngc_secret_name` to its name.
 available under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
 
 **Instance quota** — four endpoints deploy simultaneously:
-- Two `ml.g6e.12xlarge` SageMaker endpoint instances
-- Two `g6e.12xlarge` EKS nodes (via EKS Auto Mode NodePool)
+- Two `ml.g6e.xlarge` SageMaker endpoint instances
+- Two Karpenter-selected `g6e` (xlarge-class) EKS nodes (via EKS Auto Mode NodePool)
 
 Request quota increases in the [Service Quotas console](https://console.aws.amazon.com/servicequotas/)
 under **Amazon SageMaker** and **Amazon EC2** if needed.

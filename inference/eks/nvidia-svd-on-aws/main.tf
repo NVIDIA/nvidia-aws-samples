@@ -10,6 +10,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 module "terraform-aws-nim" {
+  # Published module. To test local terraform-aws-nim edits instead, temporarily use:
+  #   source = "../../terraform-aws-nim"
   source = "git::https://github.com/NVIDIA/nvidia-aws-samples.git//inference/terraform-aws-nim?ref=main"
 
   project_prefix = "svd"
@@ -40,11 +42,13 @@ module "terraform-aws-nim" {
       #   * Best on-demand availability in us-east-1 across AZs
       #   * Tradeoff: ~5x slower per video than L40S (~24s vs ~5s on the sample clip)
       #
-      # Upgrade paths if you need more throughput:
-      #   g5.2xlarge  — 1× A10G (24 GB) — modest step up, broader availability than g6/g6e
-      #   g6.2xlarge  — 1× L4   (24 GB) — closest cost/perf compromise below L40S
-      #   g6e.2xlarge — 1× L40S (48 GB) — best throughput; matches SageMaker ml.g6e.2xlarge
-      instance_type = "g4dn.2xlarge"
+      # node_pool lists ALL of SVD's supported GPU families (T4/A10G/L4/L40S). Karpenter
+      # provisions whichever has capacity across AZs — a direct hedge against GPU scarcity,
+      # since SVD runs functionally on any of them (throughput differs: L40S fastest, T4
+      # cheapest/most-available). Narrow to one family, or add a deployment node_selection,
+      # to pin a specific GPU.
+      #   SVD v2 adds datacenter GPUs (A100/H100/H200/B200) — append p4d/p5/p5e/p6 then.
+      node_pool = { instance_families = ["g4dn", "g5", "g6", "g6e"] }
 
       endpoint_public_access  = true
       endpoint_private_access = true
@@ -83,6 +87,13 @@ module "terraform-aws-nim" {
         nim_type         = "custom"
         protocol         = "grpc"
         # port defaults to 8001 (gRPC convention for Maxine NIMs)
+
+        # node_selection = SVD's VRAM floor (the capacity gate), complementing the
+        # cluster node_pool's NVENC/NVDEC family list (the architecture gate) — the
+        # two gates together. T4's 16 GB clears 15, so all four families stay
+        # eligible and Karpenter still picks the cheapest (g4dn/T4). Rendered into
+        # the pod's nodeAffinity at deploy time.
+        node_selection = { min_gpu_memory_gib = 15 }
 
         # Restrict the inference NLB to the deployer's IP. The internet-facing NLB
         # otherwise accepts traffic from 0.0.0.0/0 (see the module README's

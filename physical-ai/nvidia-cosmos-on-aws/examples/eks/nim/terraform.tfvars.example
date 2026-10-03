@@ -1,0 +1,27 @@
+# Copy this file to terraform.tfvars and set the values below.
+
+# ─── NGC credentials — set EXACTLY ONE of the two ──────────────────────────────
+#
+# Path A (recommended) — Name of the Secrets Manager secret holding your NGC
+# API key. The secret should be a JSON key/value with an `access-key` field,
+# e.g. { "access-key": "<ngc-api-key>" }.
+#
+# The Cosmos image is public GA, so a standard nvapi-* NGC key works.
+# CodeBuild pulls the image with this key, so an invalid key fails at
+# apply/base-sync, not at plan.
+ngc_secret_name = "your-ngc-secret-name"
+
+# Path B (dev-only) — Inline NGC API key. Uncomment + paste the raw key
+# and leave ngc_secret_name = null. The value ends up in Terraform state — use
+# only for local dev / short-lived POCs.
+# ngc_api_key = "<ngc-api-key>"
+
+# ─── Image (optional) ──────────────────────────────────────────────────────────
+#
+# Defaults to the public GA image (see variables.tf). Override to pin a
+# different tag:
+# source_image_uri = "nvcr.io/nim/nvidia/cosmos3:<version>"
+
+# ─── Region (optional) ─────────────────────────────────────────────────────────
+# Defaults to the AWS provider's region. P5/P6 capacity is scarce — check quotas.
+# region = "us-east-1"
