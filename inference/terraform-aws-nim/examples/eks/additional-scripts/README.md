@@ -8,10 +8,11 @@ containers before the NIM pod starts. Both a local file and an existing S3 objec
 | `llama-nemotron-nano-8b` | NIM  | Init containers before the NIM Helm pod starts    |
 
 The same `additional_scripts` mechanism works for the open-weight (vLLM) path — see
-`examples/eks/open-weight/` for that pattern. This example uses a single deployment on a
-`g6e.xlarge` (1× L40S) node. To run NIM + open-weight on the same cluster, bump the
-cluster's `instance_type` to a multi-GPU size like `g6e.12xlarge` (4× L40S) so the two
-deployments don't contend for a single GPU.
+`examples/eks/open-weight/` for that pattern. This example uses a single deployment; the
+cluster's `node_pool = { instance_families = ["g6e"] }` lets Karpenter provision a
+single-GPU g6e node (xlarge-class) for it. To run NIM + open-weight on the same cluster,
+widen `node_pool.instance_families` (and/or raise capacity) so Karpenter can bring up enough
+GPUs that the two deployments don't contend for one.
 
 ---
 

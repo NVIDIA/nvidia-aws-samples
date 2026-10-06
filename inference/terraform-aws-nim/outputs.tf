@@ -146,3 +146,8 @@ output "model_profile_cache_uris" {
     k => v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_effective_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : null
   }
 }
+
+output "eks_nodepool_manifests" {
+  description = "Rendered Karpenter GPU NodePool (and custom NodeClass, when capacity reservations are set) manifest per EKS cluster key, as applied by cluster-setup. Useful for inspecting what node_pool / instance_type produced."
+  value       = local.eks_nodepool_manifest
+}

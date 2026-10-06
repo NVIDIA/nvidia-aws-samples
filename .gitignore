@@ -46,3 +46,7 @@ credentials
 node_modules/
 package-lock.json
 cdk.out/
+
+# Terraform
+*.tfstate*
+.terraform/

@@ -72,9 +72,11 @@ phases:
       # (custom .tgz on S3) or HELM_CHART_VERSION (pinned NGC fetch — required
       # because NGC exposes no chart index, so helm repo add/pull don't work).
       - |
-        # Skip chart fetch for open-weight (MODEL_ID set) and gRPC (raw kubectl path,
-        # bypasses Helm entirely). Only the NIM HTTP Helm path needs a chart.
-        if [ -z "${MODEL_ID}" ] && [ "${PROTOCOL}" != "grpc" ]; then
+        # Fetch a Helm chart only on the NIM HTTP *Helm* path — i.e. a chart is
+        # actually specified. Skipped for open-weight (MODEL_ID set), gRPC (raw
+        # kubectl), and HTTP *no-chart* (raw kubectl Deployment+Service, e.g.
+        # Cosmos). No chart specified → fall through to the raw-manifest build.
+        if [ -z "${MODEL_ID}" ] && [ "${PROTOCOL}" != "grpc" ] && { [ -n "${HELM_CHART_S3_URI}" ] || [ -n "${HELM_CHART_NAME}" ]; }; then
           if [ -n "${HELM_CHART_S3_URI}" ]; then
             aws s3 cp "${HELM_CHART_S3_URI}" .
           elif [ -n "${HELM_CHART_VERSION}" ]; then
@@ -109,9 +111,38 @@ phases:
           done
         fi
 
+      # Decode the node_selection affinity YAML (base64 so its newlines survive the
+      # env-var trip). Injected verbatim into the gRPC/HTTP manifest heredocs below so
+      # pods are born with the affinity — no post-apply patch, no rollover. Empty when
+      # the deployment has no node_selection → the heredoc line renders blank.
+      - |
+        NODE_AFFINITY_YAML=""
+        if [ -n "${NODE_AFFINITY_YAML_B64}" ]; then
+          NODE_AFFINITY_YAML="$(printf '%s' "${NODE_AFFINITY_YAML_B64}" | base64 -d)"
+        fi
+
       # Open-weight: raw kubectl Deployment+Service. Init syncs weights from
       # S3; main runs vllm serve. NIM path is the Helm flow below.
       - |
+        # Caller-supplied extra env (EXTRA_ENV = newline-separated KEY=<base64 value>) rendered as
+        # container env entries for the raw-manifest Deployments (gRPC and HTTP no-chart). Values
+        # are base64 so a value containing newlines or "=" cannot be mistaken for another entry;
+        # each is YAML-escaped (backslash, double quote) and newlines become \n escapes.
+        # Caller env may hold credentials: keep xtrace off while it is decoded, and never log the
+        # manifests unredacted (see log_manifest below).
+        { set +x; } 2>/dev/null
+        log_manifest() { sed -E 's/^([[:space:]]*value:[[:space:]]).*/\1"<redacted>"/' "$1" | cat -n; }
+        HTTP_EXTRA_ENV=""
+        if [ -n "${EXTRA_ENV}" ]; then
+          HTTP_EXTRA_ENV=$(echo "${EXTRA_ENV}" | while IFS= read -r line; do
+            # Split on the FIRST "=" only: base64 values end in "=" padding.
+            ek="${line%%=*}"; ev64="${line#*=}"
+            [ -z "$ek" ] && continue
+            ev=$(printf '%s' "$ev64" | base64 -d | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "%s", "\\n"} {printf "%s", $0}')
+            printf '            - name: %s\n              value: "%s"\n' "$ek" "$ev"
+          done)
+        fi
+        [ "$VERBOSE" = "true" ] && set -x || true
         if [ -n "${MODEL_ID}" ]; then
           # Additional init container YAML for heredoc injection.
           OW_ADDITIONAL_INIT_CONTAINERS=""
@@ -227,7 +258,7 @@ phases:
         EOF
           # Log the generated manifest.
           echo "=== /tmp/ow-manifest.yaml ==="
-          cat -n /tmp/ow-manifest.yaml
+          log_manifest /tmp/ow-manifest.yaml
           echo "=== end /tmp/ow-manifest.yaml ==="
 
           kubectl apply -f /tmp/ow-manifest.yaml
@@ -283,6 +314,7 @@ phases:
                 app.kubernetes.io/instance: ${RELEASE_NAME}
             spec:
               serviceAccountName: nim-sa
+        ${NODE_AFFINITY_YAML}
               initContainers:
         ${GRPC_ADDITIONAL_INIT_CONTAINERS}
               containers:
@@ -295,6 +327,7 @@ phases:
                         secretKeyRef:
                           name: ngc-api-key
                           key: NGC_API_KEY
+        ${HTTP_EXTRA_ENV}
                   ports:
                     - name: grpc
                       containerPort: ${PORT}
@@ -364,10 +397,160 @@ phases:
 
             # Log the generated manifest.
             echo "=== /tmp/grpc-nim-manifest.yaml ==="
-            cat -n /tmp/grpc-nim-manifest.yaml
+            log_manifest /tmp/grpc-nim-manifest.yaml
             echo "=== end /tmp/grpc-nim-manifest.yaml ==="
 
+            # Affinity is baked into the manifest above (no post-apply patch → no rollover).
             kubectl apply -f /tmp/grpc-nim-manifest.yaml
+
+            if [ -n "${MANIFEST_PATCH}" ]; then
+              echo "Applying manifest_patch to deployment ${RELEASE_NAME}"
+              printf '%s' "${MANIFEST_PATCH}" > /tmp/manifest-patch.yaml
+              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/manifest-patch.yaml
+            fi
+
+            kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
+
+          elif [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; then
+
+            # HTTP NIM path: raw kubectl Deployment+Service, no Helm chart.
+            # Used for HTTP NIMs with no published chart (e.g. Cosmos 3 world
+            # model). Mirrors the gRPC path with httpGet probes on /v1/health/*
+            # and the caller's extra env (EXTRA_ENV, e.g. NIM_MODEL_TYPE).
+
+            HTTP_ADDITIONAL_INIT_CONTAINERS=""
+            if [ -n "${ADDITIONAL_SCRIPTS}" ]; then
+              i=0
+              HTTP_ADDITIONAL_INIT_CONTAINERS=$(echo "${ADDITIONAL_SCRIPTS}" | while IFS= read -r uri; do
+                [ -z "$uri" ] && continue
+                printf '        - name: additional-script-%d\n' "$i"
+                printf '          image: amazon/aws-cli:latest\n'
+                printf '          command: ["/bin/sh", "-c"]\n'
+                printf '          args:\n'
+                printf '            - |\n'
+                printf '              echo "Running additional script [%d]: %s"\n' "$i" "$uri"
+                printf '              aws s3 cp "%s" /tmp/script.sh\n' "$uri"
+                printf '              chmod +x /tmp/script.sh && /tmp/script.sh\n'
+                printf '          env:\n'
+                printf '            - name: AWS_DEFAULT_REGION\n'
+                printf '              value: "%s"\n' "${AWS_REGION}"
+                i=$((i + 1))
+              done)
+            fi
+
+            cat > /tmp/http-nim-manifest.yaml <<EOF
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${RELEASE_NAME}
+          namespace: ${NAMESPACE}
+          labels:
+            app: ${RELEASE_NAME}
+            app.kubernetes.io/instance: ${RELEASE_NAME}
+        spec:
+          progressDeadlineSeconds: 3600
+          replicas: ${REPLICAS}
+          selector:
+            matchLabels:
+              app: ${RELEASE_NAME}
+          template:
+            metadata:
+              labels:
+                app: ${RELEASE_NAME}
+                app.kubernetes.io/instance: ${RELEASE_NAME}
+            spec:
+              serviceAccountName: nim-sa
+        ${NODE_AFFINITY_YAML}
+              initContainers:
+        ${HTTP_ADDITIONAL_INIT_CONTAINERS}
+              containers:
+                - name: nim
+                  image: ${ECR_IMAGE_REPOSITORY}:${ECR_IMAGE_TAG}
+                  imagePullPolicy: IfNotPresent
+                  env:
+                    - name: NGC_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ngc-api-key
+                          key: NGC_API_KEY
+        ${HTTP_EXTRA_ENV}
+                  ports:
+                    - name: http
+                      containerPort: ${PORT}
+                      protocol: TCP
+                  resources:
+                    limits:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                    requests:
+                      nvidia.com/gpu: ${GPU_COUNT}
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+                  readinessProbe:
+                    httpGet:
+                      path: /v1/health/ready
+                      port: ${PORT}
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 10
+                    failureThreshold: 120
+                  livenessProbe:
+                    httpGet:
+                      path: /v1/health/live
+                      port: ${PORT}
+                    initialDelaySeconds: 120
+                    periodSeconds: 30
+                    timeoutSeconds: 10
+                    failureThreshold: 10
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 8Gi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${RELEASE_NAME}-svc
+          namespace: ${NAMESPACE}
+          labels:
+            app.kubernetes.io/instance: ${RELEASE_NAME}
+            app.kubernetes.io/name: ${RELEASE_NAME}
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: external
+            service.beta.kubernetes.io/aws-load-balancer-scheme: ${LB_SCHEME}
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+            service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+        spec:
+          selector:
+            app: ${RELEASE_NAME}
+          type: LoadBalancer
+          loadBalancerClass: eks.amazonaws.com/nlb
+        ${LB_SOURCE_RANGES_YAML}
+          ports:
+            - name: http
+              port: ${PORT}
+              targetPort: ${PORT}
+              protocol: TCP
+        EOF
+
+            echo "=== /tmp/http-nim-manifest.yaml ==="
+            log_manifest /tmp/http-nim-manifest.yaml
+            echo "=== end /tmp/http-nim-manifest.yaml ==="
+
+            kubectl apply -f /tmp/http-nim-manifest.yaml
+
+            # node_selection affinity is baked into the manifest above, so pods are
+            # born on the right node with no post-apply patch and no rollover. A user
+            # manifest_patch (below) still applies on top.
+
+            if [ -n "${MANIFEST_PATCH}" ]; then
+              echo "Applying manifest_patch to deployment ${RELEASE_NAME}"
+              printf '%s' "${MANIFEST_PATCH}" > /tmp/manifest-patch.yaml
+              kubectl patch deployment "${RELEASE_NAME}" -n "${NAMESPACE}" --type=strategic --patch-file /tmp/manifest-patch.yaml
+            fi
+
             kubectl rollout status deployment "${RELEASE_NAME}" --namespace "${NAMESPACE}" --timeout=90m
 
           else
@@ -470,6 +653,14 @@ phases:
               touch /tmp/nim-values.yaml
               ;;
           esac
+
+          # node_selection → chart-level `affinity` value (pod-spec affinity; supported by the
+          # NGC NIM charts). The raw-manifest paths inject the same block directly. Appended
+          # before the S3 cache block and before helm_values_override (-f), so a user-supplied
+          # affinity in the override still wins. NODE_AFFINITY_YAML is 6-space indented.
+          if [ -n "${NODE_AFFINITY_YAML}" ]; then
+            printf '%s\n' "${NODE_AFFINITY_YAML}" | sed 's/^      //' >> /tmp/nim-values.yaml
+          fi
 
           # S3 cache sync init container (llm/embedding only). Charts already
           # define a model-store emptyDir at /model-store — mount the same.

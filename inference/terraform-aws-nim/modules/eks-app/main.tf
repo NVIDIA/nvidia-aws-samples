@@ -200,6 +200,23 @@ resource "aws_codebuild_project" "nim_deploy" {
       value = var.helm_values_override != null ? var.helm_values_override : ""
     }
     environment_variable {
+      name  = "MANIFEST_PATCH"
+      value = var.manifest_patch != null ? var.manifest_patch : ""
+    }
+    environment_variable {
+      # Base64 so the multi-line YAML affinity block survives the env-var trip
+      # intact; the buildspec decodes it and injects it into the manifest heredoc.
+      name  = "NODE_AFFINITY_YAML_B64"
+      value = base64encode(var.node_affinity_yaml)
+    }
+    environment_variable {
+      # Newline-separated KEY=<base64 value>: base64 keeps a value that contains
+      # newlines or "=" from being mistaken for another entry. The raw-manifest
+      # paths decode and emit each as a container env entry. Empty when none.
+      name  = "EXTRA_ENV"
+      value = join("\n", [for k, v in var.env : "${k}=${base64encode(v)}"])
+    }
+    environment_variable {
       name  = "GPU_COUNT"
       value = tostring(var.gpu_count)
     }
@@ -311,6 +328,9 @@ resource "terraform_data" "deploy_trigger" {
       helm_chart_version         = var.helm_chart_version != null ? var.helm_chart_version : ""
       helm_chart_s3_uri          = var.helm_chart_s3_uri != null ? var.helm_chart_s3_uri : ""
       helm_values_override       = var.helm_values_override != null ? var.helm_values_override : ""
+      manifest_patch             = var.manifest_patch != null ? var.manifest_patch : ""
+      node_affinity_yaml         = var.node_affinity_yaml
+      env                        = jsonencode(var.env)
       gpu_count                  = var.gpu_count
       replicas                   = var.replicas
       load_balancer_internal     = var.load_balancer_internal

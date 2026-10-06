@@ -1271,7 +1271,7 @@ protocol, plus the NIM startup wrapper (`launch.sh`).
 | File | Purpose |
 |------|---------|
 | `shim/Dockerfile` | Generic, ARG-driven. Build-args: `NIM_CMD`, `NIM_ENTRYPOINT`, `CADDY_BACKEND_PORT` (empty = auto-detect from `NIM_HTTP_API_PORT` at runtime), `CUDA_DRIVER_LABEL` |
-| `shim/caddy-config.json` | Caddy config. Maps `/invocations*` → `/v1/chat/completions`, `/ping*` → `${HEALTH_PATH}` (framework-specific: NIM = `/v1/health/ready`, vLLM = `/health`). Template variables substituted by `launch.sh` via sed before passing to Caddy. |
+| `shim/caddy-config.json` | Caddy config. Maps `/invocations*` → `${INFER_PATH}`, `/ping*` → `${HEALTH_PATH}`. Both are template variables substituted by `launch.sh` via sed from `NIM_INFER_PATH` / `NIM_HEALTH_PATH` before passing to Caddy. Defaults: infer `/v1/chat/completions`, health `/v1/health/ready` (NIM) or `/health` (vLLM). Override per endpoint via `shim_config.infer_path` — e.g. Cosmos sets `/v1/infer`. |
 | `shim/launch.sh` | Starts NIM + Caddy. Syncs `MODEL_PROFILE_CACHE` from S3 at startup. Monitors NIM process — if NIM exits, kills Caddy immediately (prevents SageMaker startup timeout on failure) |
 | `shim/asset-build.sh` | **Future PR** — custom NIM build (HF → ONNX → TRT). Not included in the shim Docker image. Alpamayo-specific. See file header for re-enable steps. |
 
@@ -1290,9 +1290,76 @@ SageMaker reads this label to auto-select the inference AMI (driver version). Se
 - `al2023-ami-sagemaker-inference-gpu-3-1` (550.x driver) — insufficient for CUDA 13.0 container.
 - Current working config: g6e, no CUDA label, SageMaker default AMI → driver >= 580.95 auto-selected.
 
+### Native SageMaker BYOC (`NIM_SAGEMAKER_MODE`) — the shim's off-ramp
+
+Modern NIMs implement the SageMaker BYOC contract **natively**, which is what eventually retires
+the shim. When native mode is active the NIM itself listens on port **8080**, exposes **`GET /ping`**
+(aliased to its readiness check), and exposes **`POST /invocations`** (rewritten internally to its
+inference route). That is exactly what the Caddy shim does today, so for a NIM that supports native
+mode the shim is redundant.
+
+**`NIM_SAGEMAKER_MODE` semantics (per NVIDIA's NIM LLM docs — verify per NIM version):**
+
+| Value | Effect |
+|-------|--------|
+| _unset_ | **Auto-detected** on a real endpoint when SageMaker injects `SAGEMAKER_MULTI_MODEL`, `SAGEMAKER_REGION`, or `SAGEMAKER_BIND_TO_PORT`. No action needed on a genuine endpoint. |
+| `1` | **Force-enable** (local testing, or a belt-and-suspenders override). |
+| `0` | **Suppress** auto-detection. |
+
+> Note: auto-detect is the expected path on a real SageMaker endpoint. `=1` is an override, not a
+> required fix. (An earlier draft had this backwards — it is harmless to set explicitly, but frame it
+> as belt-and-suspenders.)
+
+**Coverage (version boundary is approximate — confirm per NIM):**
+
+| NIM family | Native BYOC? | Source |
+|------------|--------------|--------|
+| LLM NIMs (2.x+) | Yes | NVIDIA NIM LLM docs (native `/ping` + `/invocations` on 8080) |
+| Cosmos WFM generator NIM (`cosmos3:2.0.0`, `nano`/etc.) | **No — shim required** | **Verified in this repo's working example**: native contract is port **8000**, `POST /v1/infer`, `GET /v1/health/ready`+`/live` — NOT the BYOC `:8080` `/invocations` `/ping`. Already handled: [`examples/sagemaker/nim`](examples/sagemaker/nim/main.tf) sets `shim_config.infer_path = "/v1/infer"`, runs as an **async** endpoint (inline base64 MP4 → S3). `NIM_SAGEMAKER_MODE` does not apply. |
+| Cosmos 3 "Certified"/Turbo NIM (separate image) | Reported yes | **Unverified** — per Brett Hamilton (DevRel); a distinct image from the generator we deploy. Test before relying on it. |
+| `cosmos3-reasoner` NIM (separate image) | n/a | Uses `/v1/chat/completions` (matches the shim default). Not the generator; not deployed here. |
+| VLM NIMs | No (shim) | No native mode in public docs |
+| Speech NIMs (Parakeet, etc.) | No (shim) | AWS blog uses notebook-driven BYOC |
+| Older LLM NIMs (pre-2.x) | No (shim) | — |
+| Alpamayo (custom, `/v1/infer`) | No (shim) | Custom infer path |
+
+Native mode is **not universal**, so the shim stays a first-class supported path and migration is
+per-endpoint. Cosmos in particular is shim-only.
+
+#### Proposed `sagemaker_mode` capability flag (not yet implemented)
+
+Add an opt-in to the `nim` entry of [`sagemaker_endpoints`](variables.tf#L142):
+
+```hcl
+sagemaker_mode = optional(string, "shim")  # "shim" (default) | "native"
+```
+
+What `"native"` must do in this codebase (nothing is `count`-gated; there is no separate Caddy
+container to drop — the shim is baked into one image):
+
+1. **Point the Model image at the base NIM image, not the shim tag.** [`main.tf:138`](main.tf#L138)
+   resolves `primary_container.image` via `local.endpoint_to_shim_tag`; native mode resolves to the
+   synced base NIM image instead.
+2. **Exclude the endpoint from [`local.shim_map`](locals.tf#L197)** so the shim CodeBuild project
+   and its build trigger are never created for it (`for_each` over the map — drop the key, get no
+   resources).
+3. **Set `NIM_SAGEMAKER_MODE = "1"` in [`local.nim_model_env`](locals.tf#L918)** (which already sets
+   `NIM_INFER_PATH` from `shim_config.infer_path` on the shim path).
+
+`infer_path` / `health_path` are shim-path mechanisms and are irrelevant on the native path (native
+mode bypasses the shim). Default stays `"shim"` for backward compatibility.
+
+**Verify before flipping any endpoint to `"native"`:** deploy the NIM with `NIM_SAGEMAKER_MODE=1`
+and no shim, confirm `GET /ping` → 200 and `POST /invocations` returns valid inference, then update
+the coverage table and migrate.
+
+Docs: [NIM LLM AWS deployment](https://docs.nvidia.com/nim/large-language-models/2.0.3/deployment/csp-deployment/aws.html),
+[NIM LLM environment variables](https://docs.nvidia.com/nim/large-language-models/2.0.12/reference/environment-variables.html).
+
 ### Removal checklist (when NVIDIA ships native SageMaker support)
 
-When native SageMaker support is available, remove:
+When native SageMaker support is available **for all NIM families you deploy** (see coverage table
+above), remove:
 - `shim/` directory
 - `shim_config` variable (mark `deprecated` first, then remove)
 - CodeBuild #2 (shim project) from `codebuild.tf`
