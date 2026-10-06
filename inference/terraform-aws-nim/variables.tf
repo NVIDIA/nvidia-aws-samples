@@ -747,10 +747,13 @@ variable "eks_deployments" {
                                      "custom"    — Custom / internal NIM, or a NIM that doesn't fit
                                                    the categories above (e.g. Maxine media NIMs:
                                                    SVD, Audio2Face, Studio Voice, Eye Contact, BNR).
-                                                   When protocol = "http": must set helm_chart_s3_uri
+                                                   When protocol = "http": set helm_chart_s3_uri
                                                    (S3-hosted .tgz) OR both helm_chart_name +
-                                                   helm_chart_repo_url. When protocol = "grpc":
-                                                   chart info is not required (raw kubectl path).
+                                                   helm_chart_repo_url to deploy through Helm; with
+                                                   none of them the NIM deploys as a plain Deployment
+                                                   + Service (chartless raw-manifest path, e.g. Cosmos 3).
+                                                   When protocol = "grpc": chart info is not required
+                                                   (raw kubectl path).
       helm_chart_name            — Override the NGC Helm chart name. Null (default) = derived from nim_type.
       helm_chart_repo_url        — Override the base HTTPS URL for the NGC Helm chart repo.
                                    Null (default) = derived from nim_type.

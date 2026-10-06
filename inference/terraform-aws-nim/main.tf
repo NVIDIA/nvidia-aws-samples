@@ -86,6 +86,25 @@ resource "terraform_data" "validation" {
       error_message = "An eks_deployments.nim entry's node_selection.instance_types names a type that its cluster does not allow. It must equal the cluster's instance_type, or be in the cluster node_pool's instance_types / belong to one of its instance_families — otherwise the pod stays Pending."
     }
 
+    # A family-only node_selection must overlap what the cluster allows: if the cluster only
+    # offers g6e and the NIM asks for g5, no node can satisfy both, the pod waits forever.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        v.node_selection == null || v.node_selection.instance_families == null || (
+          var.eks_clusters[v.cluster_key].instance_type != null
+          ? contains(v.node_selection.instance_families, split(".", var.eks_clusters[v.cluster_key].instance_type)[0])
+          : (
+            var.eks_clusters[v.cluster_key].node_pool == null ? true : (
+              (var.eks_clusters[v.cluster_key].node_pool.instance_types == null || anytrue([for it in var.eks_clusters[v.cluster_key].node_pool.instance_types : contains(v.node_selection.instance_families, split(".", it)[0])]))
+              && (var.eks_clusters[v.cluster_key].node_pool.instance_families == null || length(setintersection(toset(var.eks_clusters[v.cluster_key].node_pool.instance_families), toset(v.node_selection.instance_families))) > 0)
+            )
+          )
+        )
+      ])
+      error_message = "An eks_deployments.nim entry's node_selection.instance_families does not overlap what its cluster allows (the cluster's instance_type, or its node_pool instance_types / instance_families). No node can satisfy both, so the pod would stay Pending."
+    }
+
     # The model profile cache is built for ONE specific GPU (NIM profiles are
     # GPU-specific). Require a pinned instance type — a single
     # node_selection.instance_types entry, or the cluster's instance_type.

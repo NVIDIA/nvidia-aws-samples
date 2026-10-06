@@ -548,3 +548,113 @@ run "env_value_with_newline_and_equals_ok" {
     }
   }
 }
+
+# A family-only node_selection must overlap what the cluster allows. Cluster offers only g6e;
+# a NIM asking for g5 can never get a node.
+run "node_selection_family_outside_cluster_families_rejected" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_families = ["g6e"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_families = ["g5"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+run "node_selection_family_vs_cluster_instance_type_rejected" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        instance_type      = "g6e.xlarge"
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_families = ["g5"] }
+        }
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.validation]
+}
+
+run "node_selection_family_overlapping_cluster_ok" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_families = ["g6e", "g5"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_families = ["g5"] }
+        }
+      }
+    }
+  }
+}
+
+run "node_selection_family_vs_cluster_type_list_ok" {
+  command = plan
+
+  variables {
+    eks_clusters = {
+      gpu = {
+        vpc_id             = "vpc-1"
+        private_subnet_ids = ["subnet-a"]
+        public_subnet_ids  = ["subnet-c"]
+        node_pool          = { instance_types = ["g6e.xlarge"] }
+      }
+    }
+    eks_deployments = {
+      nim = {
+        llm = {
+          cluster_key             = "gpu"
+          source_image_uri        = "nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.3"
+          helm_chart_version      = "1.0.0"
+          nlb_allowed_cidr_blocks = ["10.0.0.0/8"]
+          node_selection          = { instance_families = ["g6e"] }
+        }
+      }
+    }
+  }
+}

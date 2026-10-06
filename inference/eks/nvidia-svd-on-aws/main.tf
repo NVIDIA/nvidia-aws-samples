@@ -93,7 +93,12 @@ module "terraform-aws-nim" {
         # two gates together. T4's 16 GB clears 15, so all four families stay
         # eligible and Karpenter still picks the cheapest (g4dn/T4). Rendered into
         # the pod's nodeAffinity at deploy time.
-        node_selection = { min_gpu_memory_gib = 15 }
+        node_selection = {
+          min_gpu_memory_gib = 15
+          # SVD's smallest supported size is g4dn.2xlarge (8 vCPU). A family allow-list alone would admit
+          # g4dn.xlarge (4 vCPU / same 16 GB T4), so require more than 4 vCPUs.
+          extra_requirements = [{ key = "eks.amazonaws.com/instance-cpu", operator = "Gt", values = ["4"] }]
+        }
 
         # Restrict the inference NLB to the deployer's IP. The internet-facing NLB
         # otherwise accepts traffic from 0.0.0.0/0 (see the module README's

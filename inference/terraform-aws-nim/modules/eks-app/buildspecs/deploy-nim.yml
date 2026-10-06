@@ -128,6 +128,10 @@ phases:
         # container env entries for the raw-manifest Deployments (gRPC and HTTP no-chart). Values
         # are base64 so a value containing newlines or "=" cannot be mistaken for another entry;
         # each is YAML-escaped (backslash, double quote) and newlines become \n escapes.
+        # Caller env may hold credentials: keep xtrace off while it is decoded, and never log the
+        # manifests unredacted (see log_manifest below).
+        { set +x; } 2>/dev/null
+        log_manifest() { sed -E 's/^([[:space:]]*value:[[:space:]]).*/\1"<redacted>"/' "$1" | cat -n; }
         HTTP_EXTRA_ENV=""
         if [ -n "${EXTRA_ENV}" ]; then
           HTTP_EXTRA_ENV=$(echo "${EXTRA_ENV}" | while IFS= read -r line; do
@@ -138,6 +142,7 @@ phases:
             printf '            - name: %s\n              value: "%s"\n' "$ek" "$ev"
           done)
         fi
+        [ "$VERBOSE" = "true" ] && set -x || true
         if [ -n "${MODEL_ID}" ]; then
           # Additional init container YAML for heredoc injection.
           OW_ADDITIONAL_INIT_CONTAINERS=""
@@ -253,7 +258,7 @@ phases:
         EOF
           # Log the generated manifest.
           echo "=== /tmp/ow-manifest.yaml ==="
-          cat -n /tmp/ow-manifest.yaml
+          log_manifest /tmp/ow-manifest.yaml
           echo "=== end /tmp/ow-manifest.yaml ==="
 
           kubectl apply -f /tmp/ow-manifest.yaml
@@ -392,7 +397,7 @@ phases:
 
             # Log the generated manifest.
             echo "=== /tmp/grpc-nim-manifest.yaml ==="
-            cat -n /tmp/grpc-nim-manifest.yaml
+            log_manifest /tmp/grpc-nim-manifest.yaml
             echo "=== end /tmp/grpc-nim-manifest.yaml ==="
 
             # Affinity is baked into the manifest above (no post-apply patch → no rollover).
@@ -531,7 +536,7 @@ phases:
         EOF
 
             echo "=== /tmp/http-nim-manifest.yaml ==="
-            cat -n /tmp/http-nim-manifest.yaml
+            log_manifest /tmp/http-nim-manifest.yaml
             echo "=== end /tmp/http-nim-manifest.yaml ==="
 
             kubectl apply -f /tmp/http-nim-manifest.yaml
