@@ -352,7 +352,9 @@ kubectl exec -n cosmos3 "$POD" -- nvidia-smi
   **standard `nvapi-*` NGC key** works. Store it in Secrets Manager and set
   `ngc_secret_name` (Path A), or pass `ngc_api_key` for dev (Path B). An invalid key
   fails at **base-sync**, not at plan.
-- **Quota:** you need G-instance vCPU quota for `g7e.2xlarge` in your target region.
+- **Quota:** you need G-instance vCPU quota for `g7e.2xlarge` in your target region
+  (the SageMaker Generator example needs SageMaker endpoint quota for `ml.g7e.2xlarge`;
+  the SageMaker Reasoner example needs it for `ml.g6e.2xlarge`).
   Check Service Quotas and request an increase if needed.
 - **GA image, no chart:** Cosmos has **no Helm chart**. The module deploys it via its
   raw-kubectl `Deployment`+`Service` path (`nim_type = "custom"`, `protocol = "http"`,

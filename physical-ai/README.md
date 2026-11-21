@@ -21,9 +21,10 @@ underlying AWS infrastructure (EKS Auto Mode, SageMaker, networking, image sync)
 
 ## Requirements
 
-- An AWS account with quota for the GPU instances each sample requires (Cosmos 3
-  needs Hopper or newer: `g7e` — the EKS default and the SageMaker `ml.g7e.2xlarge` — plus
-  `p5`/`p5en`/`p6-b200` if you use them; see the sample README for the full support matrix)
+- An AWS account with quota for the GPU instances each sample requires (the Cosmos 3
+  Generator needs Hopper or newer: `g7e` — the EKS default and the SageMaker `ml.g7e.2xlarge` — plus
+  `p5`/`p5en`/`p6-b200` if you use them; the SageMaker Reasoner example needs SageMaker
+  endpoint quota for `ml.g6e.2xlarge`; see the sample README for the full support matrix)
 - Access to the relevant NVIDIA NIM container images on NGC
 - The AWS CLI installed and configured
 
