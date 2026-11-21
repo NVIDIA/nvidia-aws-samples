@@ -50,7 +50,8 @@ The **`cosmos3` Generator NIM is self-contained** — it runs *both* towers in o
 container (reasoner grounds your prompt/image, generator makes the video). **For
 video generation you deploy this one NIM.** The separate **`cosmos3-reasoner` NIM**
 exposes the reasoner path standalone (text→text) — deploy it only if you also want
-standalone reasoning.
+standalone reasoning; [`examples/sagemaker/reasoner`](examples/sagemaker/reasoner/)
+deploys it as a SageMaker real-time endpoint.
 
 You can see both towers in a single running pod (`nvidia-smi` process list) — a
 diffusion `python3` process (the Generator) and a `VLLM::EngineCore` process (the
@@ -279,9 +280,11 @@ Response shape: `{ "b64_video": "<base64 MP4>", "seed": 42, ... }`.
 > clip (validated: `1280×720`, `24 fps`, ~8 s / 189 frames for the default params).
 > **macOS QuickTime can't play VP9** and will say "not compatible" — the file is fine.
 > Play it in **VLC** or **Chrome**, or transcode to H.264:
+>
 > ```bash
 > ffmpeg -i cosmos_test.mp4 -c:v libx264 -pix_fmt yuv420p cosmos_h264.mp4
 > ```
+>
 
 **`model_mode` values accepted by `/v1/infer`** (per the cosmos-cookbook API
 reference — we validated `text2video` only; which modes a given tower/variant serves

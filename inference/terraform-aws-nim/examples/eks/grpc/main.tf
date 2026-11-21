@@ -59,6 +59,14 @@ module "terraform-aws-nim" {
         protocol         = "grpc"
         # port defaults to 8001 (gRPC convention for Maxine NIMs)
 
+        # SVD's VRAM floor, plus a vCPU floor: SVD's smallest supported size is
+        # g4dn.2xlarge (8 vCPU). The family allow-list alone would admit g4dn.xlarge
+        # (4 vCPU, same 16 GB T4), so require more than 4 vCPUs.
+        node_selection = {
+          min_gpu_memory_gib = 15
+          extra_requirements = [{ key = "eks.amazonaws.com/instance-cpu", operator = "Gt", values = ["4"] }]
+        }
+
         # Restrict the internet-facing NLB to the deployer's IP. Required by module
         # validation when load_balancer_internal = false. Use ["0.0.0.0/0"] to
         # opt into a fully open endpoint.

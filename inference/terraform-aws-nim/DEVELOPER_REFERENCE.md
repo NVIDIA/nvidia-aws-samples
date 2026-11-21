@@ -1315,9 +1315,9 @@ mode the shim is redundant.
 | NIM family | Native BYOC? | Source |
 |------------|--------------|--------|
 | LLM NIMs (2.x+) | Yes | NVIDIA NIM LLM docs (native `/ping` + `/invocations` on 8080) |
-| Cosmos WFM generator NIM (`cosmos3:2.0.0`, `nano`/etc.) | **No — shim required** | **Verified in this repo's working example**: native contract is port **8000**, `POST /v1/infer`, `GET /v1/health/ready`+`/live` — NOT the BYOC `:8080` `/invocations` `/ping`. Already handled: [`examples/sagemaker/nim`](examples/sagemaker/nim/main.tf) sets `shim_config.infer_path = "/v1/infer"`, runs as an **async** endpoint (inline base64 MP4 → S3). `NIM_SAGEMAKER_MODE` does not apply. |
+| Cosmos WFM generator NIM (`cosmos3:2.0.0`, `nano`/etc.) | **No — shim required** | **Verified in this repo's working example**: native contract is port **8000**, `POST /v1/infer`, `GET /v1/health/ready`+`/live` — NOT the BYOC `:8080` `/invocations` `/ping`. Already handled: the Cosmos sample's [`examples/sagemaker/nim`](../../physical-ai/nvidia-cosmos-on-aws/examples/sagemaker/nim/main.tf) sets `shim_config.infer_path = "/v1/infer"`, runs as an **async** endpoint (inline base64 MP4 → S3). `NIM_SAGEMAKER_MODE` does not apply. |
 | Cosmos 3 "Certified"/Turbo NIM (separate image) | Reported yes | **Unverified** — per Brett Hamilton (DevRel); a distinct image from the generator we deploy. Test before relying on it. |
-| `cosmos3-reasoner` NIM (separate image) | n/a | Uses `/v1/chat/completions` (matches the shim default). Not the generator; not deployed here. |
+| `cosmos3-reasoner` NIM (separate image) | n/a | Uses `/v1/chat/completions` (matches the shim default). Not the generator; deployed by the Cosmos sample's separate [`examples/sagemaker/reasoner`](../../physical-ai/nvidia-cosmos-on-aws/examples/sagemaker/reasoner/main.tf). |
 | VLM NIMs | No (shim) | No native mode in public docs |
 | Speech NIMs (Parakeet, etc.) | No (shim) | AWS blog uses notebook-driven BYOC |
 | Older LLM NIMs (pre-2.x) | No (shim) | — |

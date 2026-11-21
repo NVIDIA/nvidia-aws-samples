@@ -18,8 +18,8 @@ variable "ngc_api_key" {
 
   validation {
     condition = (
-      (var.ngc_secret_name != null && trimspace(var.ngc_secret_name) != "")
-      != (var.ngc_api_key != null && trimspace(var.ngc_api_key) != "")
+      (try(trimspace(var.ngc_secret_name), "") != "")
+      != (try(trimspace(var.ngc_api_key), "") != "")
     )
     error_message = "Exactly one of ngc_secret_name (Path A, Secrets Manager) or ngc_api_key (Path B, inline) must be set to a non-empty value — not both, not neither."
   }

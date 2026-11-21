@@ -26,7 +26,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(local.vpc_cidr, 8, count.index)
   availability_zone_id    = local.az_ids[count.index]
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false
 
   tags = {
     Name                     = "cosmos-eks-public-${count.index}"

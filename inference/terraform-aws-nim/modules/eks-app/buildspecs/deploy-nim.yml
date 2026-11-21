@@ -782,7 +782,8 @@ phases:
       #     ServiceMonitor needed.
       #
       # Deployment-name resolution differs by path:
-      #   kubectl paths (open-weight, gRPC) → RELEASE_NAME is the Deployment name
+      #   kubectl paths (open-weight, gRPC, chartless HTTP) → RELEASE_NAME is the
+      #                                       Deployment name
       #   NIM Helm path                     → chart controls the name; look it up
       #
       # KEDA quirks worth knowing:
@@ -797,11 +798,13 @@ phases:
       # -----------------------------------------------------------------
       - |
         if [ "$AUTOSCALING_ENABLED" = "true" ]; then
-          # Kubectl paths (open-weight, gRPC) emit a Deployment we control.
+          # Kubectl paths (open-weight, gRPC, chartless HTTP) emit a Deployment we
+          # control, named RELEASE_NAME. Chartless HTTP = no chart specified, the
+          # same test the deploy step uses to pick the raw-manifest branch.
           # NIM Helm charts vary — nim-llm/nim-vlm use StatefulSet (stable pod
           # identity for the model cache PVC), embedding/reranking may use
           # Deployment. Detect at runtime and set scaleTargetRef.kind accordingly.
-          if [ -n "${MODEL_ID}" ] || [ "$PROTOCOL" = "grpc" ]; then
+          if [ -n "${MODEL_ID}" ] || [ "$PROTOCOL" = "grpc" ] || { [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; }; then
             TARGET_KIND="Deployment"
             TARGET_NAME="${RELEASE_NAME}"
           else
@@ -915,6 +918,13 @@ phases:
         elif [ "$PROTOCOL" = "grpc" ]; then
           # gRPC NIM (kubectl) — same labeling as open-weight (raw manifest)
           echo "gRPC NIM deployment ${RELEASE_NAME} complete."
+          kubectl get pods -n "$NAMESPACE" -l "app=${RELEASE_NAME}"
+          LB=$(kubectl get svc -n "$NAMESPACE" "${RELEASE_NAME}-svc" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        elif [ -z "${HELM_CHART_S3_URI}" ] && [ -z "${HELM_CHART_NAME}" ]; then
+          # Chartless HTTP NIM (kubectl) — raw Deployment + Service, same labeling
+          # and Service name as the gRPC path
+          echo "NIM deployment ${RELEASE_NAME} complete (raw manifest, no Helm chart)."
           kubectl get pods -n "$NAMESPACE" -l "app=${RELEASE_NAME}"
           LB=$(kubectl get svc -n "$NAMESPACE" "${RELEASE_NAME}-svc" \
             -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")

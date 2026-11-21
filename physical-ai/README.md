@@ -15,7 +15,9 @@ underlying AWS infrastructure (EKS Auto Mode, SageMaker, networking, image sync)
   with **EKS** (raw manifest, synchronous HTTP `POST /v1/infer`) and **SageMaker async**
   (Caddy shim, S3-backed) variants. Cosmos 3 is a Mixture-of-Transformer world
   model; this sample deploys the Generator tower. Requires Hopper-or-newer GPUs
-  (`g7e` RTX PRO 6000 Blackwell, or P5/P6 H100/H200/B200).
+  (`g7e` RTX PRO 6000 Blackwell, or P5/P6 H100/H200/B200). A separate
+  [SageMaker Reasoner example](nvidia-cosmos-on-aws/examples/sagemaker/reasoner/)
+  deploys the standalone `cosmos3-reasoner` NIM (text → text) as a real-time endpoint.
 
 ## Requirements
 
