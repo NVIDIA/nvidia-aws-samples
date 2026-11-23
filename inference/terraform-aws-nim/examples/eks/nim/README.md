@@ -3,8 +3,8 @@
 Deploys a standard NGC NIM onto an EKS Auto Mode cluster via Helm. Configured for
 `llama-3.1-nemotron-nano-8b-v1` on `g6e.xlarge` ([1× NVIDIA L40S](https://aws.amazon.com/ec2/instance-types/g6e/), 48 GB VRAM) with NGC model profile pre-caching.
 
-Change `source_image_uri`, `instance_type`, and `helm_chart_version` in [main.tf](main.tf)
-to target a different model or instance.
+Change `source_image_uri`, the cluster's `node_pool` / deployment's `node_selection`, and
+`helm_chart_version` in [main.tf](main.tf) to target a different model or GPU.
 
 ---
 

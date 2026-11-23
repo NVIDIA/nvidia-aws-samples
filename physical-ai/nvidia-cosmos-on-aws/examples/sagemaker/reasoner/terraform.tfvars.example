@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and set the values below.
+
+# ─── NGC credentials — set EXACTLY ONE of the two ──────────────────────────────
+#
+# Path A (recommended) — Name of the Secrets Manager secret holding your NGC
+# API key. The secret should be a JSON key/value with an `access-key` field.
+#
+# The Cosmos Reasoner image is public GA, so a standard nvapi-* NGC key works.
+ngc_secret_name = "your-ngc-secret-name"
+
+# Path B (dev-only) — Inline NGC API key; leave ngc_secret_name = null.
+# ngc_api_key = "<ngc-api-key>"
+
+# ─── Image (optional) ──────────────────────────────────────────────────────────
+# Defaults to the public GA reasoner image (see variables.tf). To pin a
+# different tag, override here — the rest of the example is unchanged:
+# source_image_uri = "nvcr.io/nim/nvidia/cosmos3-reasoner:<version>"
+
+# ─── Region (optional) ─────────────────────────────────────────────────────────
+# Defaults to the AWS provider's region. Requires ml.g6e.2xlarge endpoint quota.
+# region = "us-east-1"

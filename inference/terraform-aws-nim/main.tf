@@ -51,6 +51,71 @@ resource "terraform_data" "validation" {
       error_message = "One or more eks_deployments entries set `autoscaling` but their target cluster does not have `enable_autoscaling = true`. Enable autoscaling on the cluster first."
     }
 
+    # gpu_count (explicit or auto-derived) must not exceed the GPUs on the pinned
+    # instance type (a single node_selection.instance_types entry, else the cluster's
+    # instance_type) — otherwise the pod is unschedulable and hangs Pending forever.
+    # Only checked for types in the known GPU-count table. VRAM/family-based selection
+    # can't be validated at plan (the type, so GPU count, is unknown).
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        local.eks_nim_pinned_type[k] == null
+        || !contains(keys(local.instance_gpu_count), local.eks_nim_pinned_type[k])
+        || local.eks_nim_gpu_count[k] <= local.instance_gpu_count[local.eks_nim_pinned_type[k]]
+      ])
+      error_message = "An eks_deployments.nim entry requests more GPUs (gpu_count) than its pinned instance type provides. Reduce gpu_count, or pin an instance type with more GPUs."
+    }
+
+    # node_selection.instance_types must be allowed by the cluster's GPU pool, otherwise the
+    # pod can never schedule (Karpenter only launches what the NodePool allows) and the GPU
+    # count / profile cache would be computed for a type that never runs.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        v.node_selection == null || v.node_selection.instance_types == null || (
+          var.eks_clusters[v.cluster_key].instance_type != null
+          ? alltrue([for it in v.node_selection.instance_types : it == var.eks_clusters[v.cluster_key].instance_type])
+          : (
+            var.eks_clusters[v.cluster_key].node_pool == null ? true : (
+              (var.eks_clusters[v.cluster_key].node_pool.instance_types == null || alltrue([for it in v.node_selection.instance_types : contains(var.eks_clusters[v.cluster_key].node_pool.instance_types, it)]))
+              && (var.eks_clusters[v.cluster_key].node_pool.instance_families == null || alltrue([for it in v.node_selection.instance_types : contains(var.eks_clusters[v.cluster_key].node_pool.instance_families, split(".", it)[0])]))
+            )
+          )
+        )
+      ])
+      error_message = "An eks_deployments.nim entry's node_selection.instance_types names a type that its cluster does not allow. It must equal the cluster's instance_type, or be in the cluster node_pool's instance_types / belong to one of its instance_families — otherwise the pod stays Pending."
+    }
+
+    # A family-only node_selection must overlap what the cluster allows: if the cluster only
+    # offers g6e and the NIM asks for g5, no node can satisfy both, the pod waits forever.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        v.node_selection == null || v.node_selection.instance_families == null || (
+          var.eks_clusters[v.cluster_key].instance_type != null
+          ? contains(v.node_selection.instance_families, split(".", var.eks_clusters[v.cluster_key].instance_type)[0])
+          : (
+            var.eks_clusters[v.cluster_key].node_pool == null ? true : (
+              (var.eks_clusters[v.cluster_key].node_pool.instance_types == null || anytrue([for it in var.eks_clusters[v.cluster_key].node_pool.instance_types : contains(v.node_selection.instance_families, split(".", it)[0])]))
+              && (var.eks_clusters[v.cluster_key].node_pool.instance_families == null || length(setintersection(toset(var.eks_clusters[v.cluster_key].node_pool.instance_families), toset(v.node_selection.instance_families))) > 0)
+            )
+          )
+        )
+      ])
+      error_message = "An eks_deployments.nim entry's node_selection.instance_families does not overlap what its cluster allows (the cluster's instance_type, or its node_pool instance_types / instance_families). No node can satisfy both, so the pod would stay Pending."
+    }
+
+    # The model profile cache is built for ONE specific GPU (NIM profiles are
+    # GPU-specific). Require a pinned instance type — a single
+    # node_selection.instance_types entry, or the cluster's instance_type.
+    precondition {
+      condition = alltrue([
+        for k, v in var.eks_deployments.nim :
+        !(v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)) || local.eks_nim_pinned_type[k] != null
+      ])
+      error_message = "eks_deployments.nim: enable_model_profile_cache = true (llm/embedding) requires a pinned instance type — exactly one node_selection.instance_types entry (e.g. [\"g6e.xlarge\"]) or the cluster's instance_type. The cache is built for that GPU. Pin one, or disable the cache."
+    }
+
     # Future PR: restore enable_asset_build precondition when re-enabling custom build path.
   }
 }
@@ -400,7 +465,7 @@ module "eks_infra" {
   vpc_id                  = each.value.vpc_id
   private_subnet_ids      = each.value.private_subnet_ids
   public_subnet_ids       = each.value.public_subnet_ids
-  instance_type           = each.value.instance_type
+  nodepool_manifest       = local.eks_nodepool_manifest[each.key]
   kubernetes_version      = each.value.kubernetes_version
   cache_bucket_arn        = local.cluster_has_cache[each.key] ? aws_s3_bucket.nim_cache[0].arn : null
   enable_cache_iam        = local.cluster_has_cache[each.key]
@@ -458,6 +523,9 @@ module "eks_app_nim" {
   helm_chart_version         = each.value.helm_chart_version
   helm_chart_s3_uri          = each.value.helm_chart_s3_uri
   helm_values_override       = each.value.helm_values_override
+  manifest_patch             = each.value.manifest_patch
+  node_affinity_yaml         = local.eks_nim_affinity_yaml[each.key]
+  env                        = each.value.env
   gpu_count                  = local.eks_nim_gpu_count[each.key]
   replicas                   = each.value.replicas
   namespace                  = coalesce(each.value.namespace, each.key)

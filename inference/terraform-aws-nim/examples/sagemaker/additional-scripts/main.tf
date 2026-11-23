@@ -19,7 +19,7 @@ module "terraform-aws-nim" {
   sagemaker_endpoints = {
     nim = {
       llama-nemotron-nano-8b = {
-        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:latest"
+        source_image_uri           = "nvcr.io/nim/nvidia/llama-3.1-nemotron-nano-8b-v1:1.8.4"
         instance_type              = "ml.g6e.xlarge"
         enable_model_profile_cache = true
 

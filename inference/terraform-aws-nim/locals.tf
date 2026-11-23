@@ -252,11 +252,14 @@ locals {
       for k, v in var.eks_deployments.nim :
       "eks/${k}" => {
         source_image_uri = v.source_image_uri
-        instance_type    = var.eks_clusters[v.cluster_key].instance_type
-        model_profile    = null
-        sync_to_ecr      = true
-        force_rebuild    = v.force_rebuild
-        debug            = v.debug
+        # NIM profiles are GPU-specific; the cache is built for the pinned instance type
+        # (a single node_selection.instance_types entry, or the cluster's instance_type).
+        # A precondition in main.tf requires one when the cache is enabled.
+        instance_type = (local.eks_nim_pinned_type[k] == null ? "" : local.eks_nim_pinned_type[k])
+        model_profile = null
+        sync_to_ecr   = true
+        force_rebuild = v.force_rebuild
+        debug         = v.debug
       }
       if v.enable_model_profile_cache && contains(["llm", "embedding"], v.nim_type)
     }
@@ -331,6 +334,23 @@ locals {
     # p5e/p5en — H200
     "p5e.48xlarge"  = 8
     "p5en.48xlarge" = 8
+    # p6 — B200 / GB200 (Blackwell)
+    "p6-b200.48xlarge"   = 8
+    "p6e-gb200.36xlarge" = 8
+    # g7 — RTX PRO 4500 Blackwell 32 GB
+    "g7.2xlarge"  = 1
+    "g7.4xlarge"  = 1
+    "g7.8xlarge"  = 1
+    "g7.12xlarge" = 2
+    "g7.24xlarge" = 4
+    "g7.48xlarge" = 8
+    # g7e — RTX PRO 6000 Blackwell 96 GB
+    "g7e.2xlarge"  = 1
+    "g7e.4xlarge"  = 1
+    "g7e.8xlarge"  = 1
+    "g7e.12xlarge" = 2
+    "g7e.24xlarge" = 4
+    "g7e.48xlarge" = 8
   }
 
   # Per-deployment resolved GPU count — kept separate per path so NIM and open-weight
@@ -339,24 +359,200 @@ locals {
   #
   # Resolution order:
   #   1. explicit gpu_count in eks_deployments (non-null) → use directly
-  #   2. auto-derived from cluster instance_type via instance_gpu_count table
-  #   3. fallback: 1 (unknown instance type — set gpu_count explicitly)
+  #   2. auto-derived from the pinned instance type (a single node_selection.instance_types
+  #      entry, else the cluster's instance_type) via the instance_gpu_count table
+  #   3. fallback: 1 (VRAM/family-based selection or unknown type — set gpu_count
+  #      explicitly for multi-GPU / tensor-parallel deployments)
   eks_nim_gpu_count = {
     for k, v in var.eks_deployments.nim :
     k => coalesce(
       v.gpu_count,
-      try(local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type], null),
+      local.eks_nim_pinned_type[k] != null ? try(local.instance_gpu_count[local.eks_nim_pinned_type[k]], null) : null,
       1
     )
   }
 
+  # The single instance type a NIM deployment will land on, when one is pinned: exactly
+  # one node_selection.instance_types entry, else the cluster's instance_type, else null
+  # (family/VRAM-based selection — the type, and so the GPU count, is unknown at plan).
+  # The single instance type a cluster is pinned to: its instance_type, or a node_pool that
+  # allows exactly one type; null when the cluster can use several (type/GPU count unknown).
+  eks_cluster_pinned_type = {
+    for k, c in var.eks_clusters : k => (
+      c.instance_type != null ? c.instance_type : (
+        try(length(c.node_pool.instance_types), 0) == 1 ? c.node_pool.instance_types[0] : null
+      )
+    )
+  }
+
+  eks_nim_pinned_type = {
+    for k, v in var.eks_deployments.nim : k => (
+      v.node_selection != null && v.node_selection.instance_types != null && length(coalesce(v.node_selection.instance_types, [])) == 1
+      ? v.node_selection.instance_types[0]
+      : local.eks_cluster_pinned_type[v.cluster_key]
+    )
+  }
+
+  # open_weight has no node_selection yet — explicit gpu_count or fallback 1.
+  # Resolution: explicit gpu_count, else the GPU count of the cluster's pinned instance type
+  # (instance_type, or a node_pool allowing exactly one type), else 1.
   eks_ow_gpu_count = {
     for k, v in var.eks_deployments.open_weight :
     k => coalesce(
       v.gpu_count,
-      try(local.instance_gpu_count[var.eks_clusters[v.cluster_key].instance_type], null),
+      local.eks_cluster_pinned_type[v.cluster_key] != null ? try(local.instance_gpu_count[local.eks_cluster_pinned_type[v.cluster_key]], null) : null,
       1
     )
+  }
+
+  # --- EKS GPU NodePool manifest (per cluster) ---
+  # node_pool defines the cluster-wide allow-list Karpenter may launch from; deployments
+  # narrow within it via pod nodeAffinity (node_selection). Built as a full manifest here
+  # (yamlencode handles indentation) and applied by cluster-setup. VRAM is GiB in the API
+  # but MiB on the Karpenter label, so *1024. Gt/Lt are strict, so -1/+1 makes the band
+  # inclusive of the stated GiB value.
+  # Normalized node_pool: null (omitted) → the broad default. A cluster that sets only
+  # instance_type is also given the defaults (it is rendered as a pinned pool below).
+  eks_node_pool = {
+    for k, c in var.eks_clusters : k => c.node_pool != null ? c.node_pool : {
+      instance_families         = null
+      instance_types            = null
+      min_gpu_memory_gib        = null
+      max_gpu_memory_gib        = null
+      max_gpus                  = 100
+      capacity_reservation_ids  = []
+      capacity_reservation_tags = {}
+    }
+  }
+  # Per-cluster reservation state.
+  eks_cluster_has_reservations = {
+    for k, c in var.eks_clusters :
+    k => length(local.eks_node_pool[k].capacity_reservation_ids) > 0 || length(local.eks_node_pool[k].capacity_reservation_tags) > 0
+  }
+  eks_nodepool_requirements = {
+    # instance_type (legacy / pinned): exactly the original NodePool requirements.
+    for k, c in var.eks_clusters : k => c.instance_type != null ? [
+      { key = "node.kubernetes.io/instance-type", operator = "In", values = [c.instance_type] },
+      { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
+      { key = "karpenter.sh/capacity-type", operator = "In", values = ["on-demand"] },
+      ] : concat(
+      [
+        { key = "eks.amazonaws.com/instance-gpu-manufacturer", operator = "In", values = ["nvidia"] },
+        { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
+        # Reserved first (drain the ODCR / Capacity Block), then on-demand fallback, when
+        # the cluster has a reservation; on-demand only otherwise.
+        { key = "karpenter.sh/capacity-type", operator = "In", values = local.eks_cluster_has_reservations[k] ? ["reserved", "on-demand"] : ["on-demand"] },
+      ],
+      local.eks_node_pool[k].instance_types != null ? [
+        { key = "node.kubernetes.io/instance-type", operator = "In", values = local.eks_node_pool[k].instance_types }
+      ] : [],
+      local.eks_node_pool[k].instance_families != null ? [
+        { key = "eks.amazonaws.com/instance-family", operator = "In", values = local.eks_node_pool[k].instance_families }
+      ] : [],
+      local.eks_node_pool[k].min_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(local.eks_node_pool[k].min_gpu_memory_gib * 1024 - 1)] }
+      ] : [],
+      local.eks_node_pool[k].max_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(local.eks_node_pool[k].max_gpu_memory_gib * 1024 + 1)] }
+      ] : [],
+    )
+  }
+  # Custom NodeClass, only when reservations are configured. A custom NodeClass does NOT
+  # inherit the "default" NodeClass's role/subnets/SGs, so they are set explicitly: the
+  # cluster's node role (named in eks-infra iam.tf), its private subnets, and the cluster
+  # security group (selected by the aws:eks:cluster-name tag EKS puts on it).
+  # WARNING (per AWS docs): setting
+  # capacityReservationSelectorTerms on ANY NodeClass stops Auto Mode from auto-using open
+  # ODCRs cluster-wide, so reserved capacity must be explicitly selected from then on.
+  eks_nodeclass_manifest = {
+    for k, c in var.eks_clusters : k => local.eks_cluster_has_reservations[k] ? yamlencode({
+      apiVersion = "eks.amazonaws.com/v1"
+      kind       = "NodeClass"
+      metadata   = { name = "${local.name_prefix}-${k}-gpu-nc" }
+      spec = {
+        role                       = "${local.name_prefix}-${k}-eks-node"
+        subnetSelectorTerms        = [for id in c.private_subnet_ids : { id = id }]
+        securityGroupSelectorTerms = [{ tags = { "aws:eks:cluster-name" = "${local.name_prefix}-${k}" } }]
+        capacityReservationSelectorTerms = concat(
+          [for id in local.eks_node_pool[k].capacity_reservation_ids : { id = id }],
+          length(local.eks_node_pool[k].capacity_reservation_tags) > 0 ? [{ tags = local.eks_node_pool[k].capacity_reservation_tags }] : []
+        )
+      }
+    }) : ""
+  }
+  eks_nodepool_only_manifest = {
+    for k, c in var.eks_clusters : k => yamlencode({
+      apiVersion = "karpenter.sh/v1"
+      kind       = "NodePool"
+      metadata   = { name = "${local.name_prefix}-${k}-gpu" }
+      spec = {
+        template = {
+          spec = {
+            nodeClassRef = { group = "eks.amazonaws.com", kind = "NodeClass", name = local.eks_cluster_has_reservations[k] ? "${local.name_prefix}-${k}-gpu-nc" : "default" }
+            requirements = local.eks_nodepool_requirements[k]
+          }
+        }
+        limits     = { "nvidia.com/gpu" = tostring(local.eks_node_pool[k].max_gpus) }
+        disruption = { consolidationPolicy = "WhenEmptyOrUnderutilized", consolidateAfter = "1m" }
+      }
+    })
+  }
+  # Applied by cluster-setup: NodeClass first (if any), then NodePool (multi-doc YAML).
+  eks_nodepool_manifest = {
+    for k, c in var.eks_clusters :
+    k => local.eks_cluster_has_reservations[k] ? "${local.eks_nodeclass_manifest[k]}\n---\n${local.eks_nodepool_only_manifest[k]}" : local.eks_nodepool_only_manifest[k]
+  }
+
+  # --- Per-deployment pod nodeAffinity (from node_selection) ---
+  # Narrows within the cluster NodePool's allow-list. Rendered as a YAML affinity block and
+  # injected INTO the deployment manifest at creation (see eks_nim_affinity_yaml) so pods are
+  # born on the right node — NOT patched after apply (which would roll the deployment: revision
+  # 1 without affinity, revision 2 with, briefly doubling GPU demand and oversizing the first
+  # node). Same GiB→MiB + inclusive Gt/Lt rules as the NodePool.
+  eks_nim_affinity_exprs = {
+    for k, v in var.eks_deployments.nim : k => v.node_selection == null ? [] : concat(
+      v.node_selection.instance_types != null ? [
+        { key = "node.kubernetes.io/instance-type", operator = "In", values = v.node_selection.instance_types }
+      ] : [],
+      v.node_selection.instance_families != null ? [
+        { key = "eks.amazonaws.com/instance-family", operator = "In", values = v.node_selection.instance_families }
+      ] : [],
+      v.node_selection.min_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Gt", values = [tostring(v.node_selection.min_gpu_memory_gib * 1024 - 1)] }
+      ] : [],
+      v.node_selection.max_gpu_memory_gib != null ? [
+        { key = "eks.amazonaws.com/instance-gpu-memory", operator = "Lt", values = [tostring(v.node_selection.max_gpu_memory_gib * 1024 + 1)] }
+      ] : [],
+      length(v.node_selection.deny_instance_types) > 0 ? [
+        { key = "node.kubernetes.io/instance-type", operator = "NotIn", values = v.node_selection.deny_instance_types }
+      ] : [],
+      [for r in v.node_selection.extra_requirements : { key = r.key, operator = r.operator, values = r.values }],
+    )
+  }
+  # The nodeAffinity object (null when there's nothing to constrain).
+  eks_nim_affinity_obj = {
+    for k, v in var.eks_deployments.nim :
+    k => (length(local.eks_nim_affinity_exprs[k]) == 0 && !(v.node_selection != null && v.node_selection.use_reserved_first)) ? null : { nodeAffinity = merge(
+      length(local.eks_nim_affinity_exprs[k]) > 0 ? {
+        requiredDuringSchedulingIgnoredDuringExecution = { nodeSelectorTerms = [{ matchExpressions = local.eks_nim_affinity_exprs[k] }] }
+      } : {},
+      (v.node_selection != null && v.node_selection.use_reserved_first) ? {
+        preferredDuringSchedulingIgnoredDuringExecution = [{
+          weight     = 100
+          preference = { matchExpressions = [{ key = "karpenter.sh/capacity-type", operator = "In", values = ["reserved"] }] }
+        }]
+      } : {}
+    ) }
+  }
+
+  # Rendered as a YAML `affinity:` block with 6-space indent baked into EVERY line (pod-spec
+  # level). deploy-nim injects it verbatim into the manifest heredoc at creation. Baking the
+  # indent (vs relying on source indent) is required because bash only applies a source-line
+  # prefix to line 1 of a multi-line var. yamlencode double-quotes keys; kubectl accepts that
+  # (same as the NodePool manifest). Empty string = no affinity block (heredoc line is blank).
+  eks_nim_affinity_yaml = {
+    for k, v in var.eks_deployments.nim :
+    k => local.eks_nim_affinity_obj[k] == null ? "" : "      ${replace(chomp(yamlencode({ affinity = local.eks_nim_affinity_obj[k] })), "\n", "\n      ")}"
   }
 }
 
@@ -504,7 +700,7 @@ locals {
   # Avoids a filtered-map key-miss when the module references this for every nim entry.
   eks_cache_prefix = {
     for k, v in var.eks_deployments.nim :
-    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${var.eks_clusters[v.cluster_key].instance_type}" : null
+    k => v.enable_model_profile_cache ? "nim-cache/${local.uri_canonical[v.source_image_uri]}/${(local.eks_nim_pinned_type[k] == null ? "" : local.eks_nim_pinned_type[k])}" : null
   }
 }
 
@@ -772,30 +968,48 @@ locals {
   # never appears in the Model's ContainerDefinition.Environment (visible via
   # sagemaker:DescribeModel) or in Terraform state.
   nim_model_env = {
+    # Drop null/empty values before they reach primary_container.environment.
+    # SageMaker/AWS strips empty env keys on create, so any null/"" left here makes
+    # the stored environment differ from the desired map on the next plan — which
+    # forces the model to be replaced on every re-apply. And because the content
+    # suffix keeper is this same map, the name doesn't rotate, so create_before_destroy
+    # then hits "Cannot create already existing model". Compacting keeps desired == stored.
     for k, v in var.sagemaker_endpoints.nim : k => {
-      NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
-      NGC_SECRET_ARN      = local.ngc_secret_arn
-      NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
-      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
-      HF_SECRET_ARN       = local.hf_secret_arn
-      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
-      CACHE_PATH          = var.cache_path
-      MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
-      ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
+      for ek, ev in merge(v.env, {
+        # Reserved keys below win over v.env so callers can't clobber
+        # credentials or the shim's infer path.
+        NGC_API_KEY         = local.ngc_api_key != null ? local.ngc_api_key : ""
+        NGC_SECRET_ARN      = local.ngc_secret_arn
+        NGC_SECRET_JSON_KEY = local.ngc_secret_json_key
+        HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+        HF_SECRET_ARN       = local.hf_secret_arn
+        HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+        CACHE_PATH          = var.cache_path
+        MODEL_PROFILE_CACHE = v.enable_model_profile_cache && local.any_cache_enabled ? "s3://${aws_s3_bucket.nim_cache[0].bucket}/nim-cache/${local.uri_canonical[v.source_image_uri]}/${replace(v.instance_type, "ml.", "")}" : ""
+        ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_nim[k]
+        # /invocations rewrite target for the shim. Per-endpoint override wins; otherwise the
+        # module-level default (/v1/chat/completions). Set shim_config.infer_path for NIMs with a
+        # non-chat inference path (e.g. Alpamayo → /v1/infer).
+        NIM_INFER_PATH = v.shim_config.infer_path != null ? v.shim_config.infer_path : var.shim_config.infer_path
+      }) : ek => ev if ev != null && ev != ""
     }
   }
 
   open_weight_model_env = {
+    # Compact null/empty values — see nim_model_env above for why (otherwise the
+    # model's environment perpetually diffs and forces replacement on re-apply).
     for k, v in var.sagemaker_endpoints.open_weight : k => {
-      NIM_CMD             = "vllm serve /opt/ml/model --port 8000 --served-model-name ${v.model_id}"
-      NIM_HEALTH_PATH     = "/health"
-      OPEN_WEIGHTS_S3_URI = local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}" : ""
-      VLLM_USER_ARGS      = local.extra_args_str[k]
-      RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
-      ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]
-      HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
-      HF_SECRET_ARN       = local.hf_secret_arn
-      HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+      for ek, ev in {
+        NIM_CMD             = "vllm serve /opt/ml/model --port 8000 --served-model-name ${v.model_id}"
+        NIM_HEALTH_PATH     = "/health"
+        OPEN_WEIGHTS_S3_URI = local.any_weights_enabled ? "s3://${aws_s3_bucket.model_assets[0].bucket}/${local.open_weight_s3_prefix[k]}" : ""
+        VLLM_USER_ARGS      = local.extra_args_str[k]
+        RECIPE_ENV_S3_URI   = local.recipe_env_s3_uri[k]
+        ADDITIONAL_SCRIPTS  = local.additional_scripts_uris_sagemaker_ow[k]
+        HF_TOKEN            = local.hf_token != null ? local.hf_token : ""
+        HF_SECRET_ARN       = local.hf_secret_arn
+        HF_SECRET_JSON_KEY  = local.hf_secret_json_key
+      } : ek => ev if ev != null && ev != ""
     }
   }
 }

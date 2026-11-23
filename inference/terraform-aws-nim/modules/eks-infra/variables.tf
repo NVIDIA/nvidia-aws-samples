@@ -29,9 +29,9 @@ variable "public_subnet_ids" {
   description = "Public subnet IDs. Tagged kubernetes.io/role/elb=1 for load balancer placement."
 }
 
-variable "instance_type" {
+variable "nodepool_manifest" {
   type        = string
-  description = "EC2 GPU instance type for NIM nodes (e.g. g6e.12xlarge). No ml. prefix."
+  description = "Rendered Karpenter GPU NodePool manifest (YAML) applied by cluster-setup. Built by the root module from eks_clusters[*].node_pool. Deployments narrow within this via pod nodeAffinity."
 }
 
 variable "kubernetes_version" {

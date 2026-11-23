@@ -27,38 +27,14 @@ phases:
 
   build:
     commands:
-      # Apply GPU NodePool — constrains Auto Mode to provision GPU instance types for NIM pods.
+      # Apply the GPU NodePool. The full manifest is rendered by the root module from
+      # eks_clusters[*].node_pool (yamlencode) and passed base64-encoded, so this buildspec
+      # just decodes and applies it. Deployments narrow within the NodePool's allow-list via
+      # pod nodeAffinity (see eks_deployments[*].node_selection).
       # nodeClassRef references the EKS-managed NodeClass (eks.amazonaws.com/v1), not
       # karpenter.k8s.aws/EC2NodeClass which is only used in self-managed Karpenter installs.
-      - |
-        cat > /tmp/gpu-nodepool.yaml <<EOF
-        apiVersion: karpenter.sh/v1
-        kind: NodePool
-        metadata:
-          name: ${NAME_PREFIX}-gpu
-        spec:
-          template:
-            spec:
-              nodeClassRef:
-                group: eks.amazonaws.com
-                kind: NodeClass
-                name: default
-              requirements:
-                - key: node.kubernetes.io/instance-type
-                  operator: In
-                  values: ["${GPU_INSTANCE_TYPE}"]
-                - key: kubernetes.io/arch
-                  operator: In
-                  values: ["amd64"]
-                - key: karpenter.sh/capacity-type
-                  operator: In
-                  values: ["on-demand"]
-          limits:
-            nvidia.com/gpu: "100"
-          disruption:
-            consolidationPolicy: WhenEmptyOrUnderutilized
-            consolidateAfter: 1m
-        EOF
+      - echo "$NODEPOOL_MANIFEST_B64" | base64 -d > /tmp/gpu-nodepool.yaml
+      - cat /tmp/gpu-nodepool.yaml
       - kubectl apply -f /tmp/gpu-nodepool.yaml
 
       # ---------------------------------------------------------------------
